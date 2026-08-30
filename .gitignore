@@ -1,0 +1,9 @@
+*.exe
+
+
+.env
+.env.*
+!.env.example
+
+
+coverage.out
