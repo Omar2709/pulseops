@@ -8,17 +8,23 @@ The project is being developed progressively to explore production-oriented back
 
 ## Current Status
 
-The project currently implements the foundations of the trading domain.
+The project currently implements the foundations of the trading domain and core order lifecycle behavior.
 
 Implemented:
 
 * BUY and SELL order sides
 * Order lifecycle states
 * Valid order-state transitions
+* Controlled order lifecycle transitions
+* Order cancellation and rejection
+* Partial and complete order fills
+* Multiple consecutive partial fills
+* Remaining quantity calculation
 * Fixed-point price representation
 * Fixed-point quantity representation
-* Encapsulated Order entity
+* Encapsulated `Order` entity
 * Order input validation and domain invariants
+* UTC-normalized order timestamps
 * Unit tests using Go's standard testing package
 
 The HTTP API, persistence layer, matching engine, Redis integration, and deployment infrastructure will be introduced progressively.
@@ -47,6 +53,8 @@ Current order states:
 
 The domain controls which state transitions are valid.
 
+Terminal states cannot transition back into active order states.
+
 ### Price
 
 Prices use a fixed-point `int64` representation instead of floating-point values.
@@ -63,6 +71,8 @@ Example:
 60000.25
 → 6,000,025 internal units
 ```
+
+This avoids binary floating-point arithmetic for monetary values.
 
 ### Quantity
 
@@ -81,7 +91,105 @@ Example:
 → 5,000,000 internal units
 ```
 
-This avoids using binary floating-point arithmetic for financial values.
+This avoids binary floating-point arithmetic for asset quantities.
+
+### Order Lifecycle
+
+Orders currently support controlled lifecycle operations including:
+
+```text
+PENDING
+  ├── OPEN
+  └── REJECTED
+
+OPEN
+  ├── PARTIALLY_FILLED
+  ├── FILLED
+  └── CANCELLED
+
+PARTIALLY_FILLED
+  ├── PARTIALLY_FILLED
+  ├── FILLED
+  └── CANCELLED
+```
+
+Invalid transitions are rejected by the domain.
+
+Examples include:
+
+```text
+PENDING → FILLED
+OPEN → PENDING
+PARTIALLY_FILLED → OPEN
+FILLED → OPEN
+FILLED → CANCELLED
+CANCELLED → OPEN
+REJECTED → OPEN
+```
+
+### Order Fills
+
+An open order can receive partial or complete fills.
+
+Example:
+
+```text
+Order quantity:
+5,000,000
+
+First fill:
+2,000,000
+
+Remaining:
+3,000,000
+
+Status:
+PARTIALLY_FILLED
+```
+
+A subsequent fill can complete the order:
+
+```text
+Previous filled quantity:
+2,000,000
+
+Second fill:
+3,000,000
+
+Total filled quantity:
+5,000,000
+
+Remaining:
+0
+
+Status:
+FILLED
+```
+
+Fill quantities must be greater than zero and cannot exceed the order's remaining quantity.
+
+Cancelled, rejected, pending, or fully filled orders cannot receive fills.
+
+### Timestamps
+
+Order timestamps are normalized internally to UTC.
+
+For example:
+
+```text
+Input:
+2026-09-16 12:00:00 UTC-5
+
+NewOrder
+   ↓
+
+Stored:
+2026-09-16 17:00:00 UTC
+```
+
+This preserves the same instant while keeping the internal representation consistent.
+
+Failed lifecycle operations do not modify `UpdatedAt`.
 
 ## Current Architecture
 
@@ -117,9 +225,9 @@ PulseOps is planned to include:
 
 * REST API using `net/http` and Chi
 * BUY and SELL order endpoints
-* Order book and bid/ask calculation
+* In-memory order book
+* Bid and ask calculation
 * Price-time priority matching engine
-* Partial and complete order fills
 * Trade execution records
 * Idempotency keys
 * PostgreSQL persistence
@@ -196,20 +304,29 @@ Tests focus primarily on domain behavior and invariants rather than implementati
 
 Examples include:
 
-* rejecting invalid order sides
-* rejecting invalid prices
-* rejecting invalid order quantities
-* protecting order state transitions
-* normalizing order symbols
-* preventing invalid domain objects
+* Rejecting invalid order sides
+* Rejecting invalid prices
+* Rejecting invalid quantities
+* Protecting order state transitions
+* Preventing terminal states from becoming active again
+* Preventing fills on orders that cannot be executed
+* Rejecting zero and negative fill quantities
+* Preventing fills that exceed the remaining quantity
+* Supporting multiple consecutive partial fills
+* Calculating remaining quantity correctly
+* Normalizing order symbols
+* Normalizing timestamps to UTC
+* Preventing invalid domain objects
+* Ensuring failed operations do not mutate order state
+* Ensuring failed operations do not modify timestamps
 
 Coverage is used as feedback rather than as the sole measure of test quality.
 
 ## Roadmap
 
-The next milestone is implementing order lifecycle behavior, including controlled state transitions, cancellation, partial fills, complete fills, and timestamp updates.
+The next milestone is introducing trade execution records and an in-memory order book, followed by price-time priority matching.
 
-Later phases will introduce the in-memory order book and matching engine before adding HTTP and persistence.
+Later phases will introduce the HTTP API, persistence, concurrency controls, Redis integration, observability, and deployment infrastructure.
 
 ## License
 

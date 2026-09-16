@@ -148,6 +148,24 @@ func TestOrderStatusCanTransitionTo(t *testing.T) {
 			to:   OrderStatusCancelled,
 			want: false,
 		},
+		{
+			name: "pending to pending",
+			from: OrderStatusPending,
+			to:   OrderStatusPending,
+			want: false,
+		},
+		{
+			name: "open to open",
+			from: OrderStatusOpen,
+			to:   OrderStatusOpen,
+			want: false,
+		},
+		{
+			name: "partially filled to partially filled",
+			from: OrderStatusPartiallyFilled,
+			to:   OrderStatusPartiallyFilled,
+			want: false,
+		},
 	}
 
 	for _, tt := range tests {

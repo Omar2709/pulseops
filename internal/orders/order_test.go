@@ -7,6 +7,8 @@ import (
 )
 
 func TestNewOrder(t *testing.T) {
+	bogotaLocation := time.FixedZone("UTC-5", -5*60*60)
+
 	createdAt := time.Date(
 		2026,
 		time.September,
@@ -15,8 +17,10 @@ func TestNewOrder(t *testing.T) {
 		0,
 		0,
 		0,
-		time.UTC,
+		bogotaLocation,
 	)
+
+	expectedUTC := createdAt.UTC()
 
 	price, err := NewPrice(6_000_025)
 	if err != nil {
@@ -77,19 +81,33 @@ func TestNewOrder(t *testing.T) {
 		)
 	}
 
-	if !order.CreatedAt().Equal(createdAt) {
+	if !order.CreatedAt().Equal(expectedUTC) {
 		t.Errorf(
 			"expected created at %v, got %v",
-			createdAt,
+			expectedUTC,
 			order.CreatedAt(),
 		)
 	}
 
-	if !order.UpdatedAt().Equal(createdAt) {
+	if order.CreatedAt().Location() != time.UTC {
+		t.Errorf(
+			"expected created at location UTC, got %v",
+			order.CreatedAt().Location(),
+		)
+	}
+
+	if !order.UpdatedAt().Equal(expectedUTC) {
 		t.Errorf(
 			"expected updated at %v, got %v",
-			createdAt,
+			expectedUTC,
 			order.UpdatedAt(),
+		)
+	}
+
+	if order.UpdatedAt().Location() != time.UTC {
+		t.Errorf(
+			"expected updated at location UTC, got %v",
+			order.UpdatedAt().Location(),
 		)
 	}
 }
@@ -196,6 +214,16 @@ func TestNewOrderValidation(t *testing.T) {
 			side:      SideBuy,
 			price:     validPrice,
 			quantity:  Quantity(0),
+			createdAt: createdAt,
+			wantErr:   ErrOrderQuantityInvalid,
+		},
+		{
+			name:      "negative order quantity",
+			id:        "ord_001",
+			symbol:    "BTC-USD",
+			side:      SideBuy,
+			price:     validPrice,
+			quantity:  Quantity(-1),
 			createdAt: createdAt,
 			wantErr:   ErrOrderQuantityInvalid,
 		},

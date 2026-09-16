@@ -110,3 +110,7 @@ func (o *Order) CreatedAt() time.Time {
 func (o *Order) UpdatedAt() time.Time {
 	return o.updatedAt
 }
+
+func (o *Order) RemainingQuantity() Quantity {
+	return o.quantity - o.filledQuantity
+}
