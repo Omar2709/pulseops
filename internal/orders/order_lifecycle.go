@@ -48,56 +48,53 @@ func (o *Order) transitionTo(next OrderStatus, at time.Time) error {
 }
 
 func (o *Order) ApplyFill(fill Quantity, at time.Time) error {
+	normalizedAt, err := o.validateFill(fill, at)
+	if err != nil {
+		return err
+	}
+
+	o.applyValidatedFill(fill, normalizedAt)
+
+	return nil
+}
+
+func (o *Order) validateFill(
+	fill Quantity,
+	at time.Time,
+) (time.Time, error) {
 	if fill <= 0 {
-		return ErrInvalidFillQuantity
+		return time.Time{}, ErrInvalidFillQuantity
 	}
 
 	if o.status != OrderStatusOpen &&
 		o.status != OrderStatusPartiallyFilled {
-		return fmt.Errorf(
+		return time.Time{}, fmt.Errorf(
 			"%w: cannot apply fill from %s",
 			ErrInvalidOrderTransition,
 			o.status,
 		)
 	}
 
-	remaining := o.RemainingQuantity()
-
-	if fill > remaining {
-		return ErrFillExceedsRemainingQuantity
+	if fill > o.RemainingQuantity() {
+		return time.Time{}, ErrFillExceedsRemainingQuantity
 	}
 
-	newFilledQuantity := o.filledQuantity + fill
+	return o.validateUpdateTime(at)
+}
 
-	if newFilledQuantity == o.quantity {
-		if err := o.transitionTo(OrderStatusFilled, at); err != nil {
-			return err
-		}
+func (o *Order) applyValidatedFill(
+	fill Quantity,
+	normalizedAt time.Time,
+) {
+	o.filledQuantity += fill
 
-		o.filledQuantity = newFilledQuantity
-
-		return nil
+	if o.filledQuantity == o.quantity {
+		o.status = OrderStatusFilled
+	} else {
+		o.status = OrderStatusPartiallyFilled
 	}
 
-	if o.status == OrderStatusOpen {
-		if err := o.transitionTo(OrderStatusPartiallyFilled, at); err != nil {
-			return err
-		}
-
-		o.filledQuantity = newFilledQuantity
-
-		return nil
-	}
-
-	normalizedAt, err := o.validateUpdateTime(at)
-	if err != nil {
-		return err
-	}
-
-	o.filledQuantity = newFilledQuantity
 	o.updatedAt = normalizedAt
-
-	return nil
 }
 
 func (o *Order) validateUpdateTime(at time.Time) (time.Time, error) {
