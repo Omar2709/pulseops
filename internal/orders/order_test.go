@@ -40,7 +40,6 @@ func TestNewOrder(t *testing.T) {
 		quantity,
 		createdAt,
 	)
-
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}

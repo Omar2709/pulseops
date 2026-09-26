@@ -39,8 +39,14 @@ Implemented:
 - Coordinated order cancellation and order-book removal
 - Validation of both counterparties before applying fills
 - Unit tests using Go's standard testing package
+- HTTP server using Go's `net/http`
+- Standard-library `ServeMux` routing
+- `GET /healthz` liveness endpoint
+- JSON response helpers
+- Standardized JSON error responses
+- HTTP handler tests using `net/http/httptest`
 
-The HTTP API, persistence layer, controlled concurrent processing, Redis integration, observability, and deployment infrastructure will be introduced progressively.
+The trading HTTP API, persistence layer, controlled concurrent processing, Redis integration, observability, and deployment infrastructure will be introduced progressively.
 
 ## Domain
 
@@ -114,12 +120,10 @@ Orders support controlled lifecycle operations:
 PENDING
 ├── OPEN
 └── REJECTED
-
 OPEN
 ├── PARTIALLY_FILLED
 ├── FILLED
 └── CANCELLED
-
 PARTIALLY_FILLED
 ├── FILLED
 └── CANCELLED
@@ -160,16 +164,12 @@ Example:
 ```text
 Order quantity:
 5,000,000
-
 First fill:
 2,000,000
-
 Filled:
 2,000,000
-
 Remaining:
 3,000,000
-
 Status:
 PARTIALLY_FILLED
 ```
@@ -179,16 +179,12 @@ A subsequent fill can complete the order:
 ```text
 Previous filled quantity:
 2,000,000
-
 Second fill:
 3,000,000
-
 Total filled quantity:
 5,000,000
-
 Remaining:
 0
-
 Status:
 FILLED
 ```
@@ -236,9 +232,7 @@ Example:
 ```text
 Input:
 2026-09-25 10:30:00 UTC-5
-
         ↓
-
 Stored:
 2026-09-25 15:30:00 UTC
 ```
@@ -359,10 +353,8 @@ Example:
 ```text
 BUY remaining:
 5
-
 SELL remaining:
 2
-
 Trade quantity:
 2
 ```
@@ -377,7 +369,6 @@ Example:
 
 ```text
 BUY 5 @ 61,000
-
 SELL 2 @ 60,000
 SELL 3 @ 60,500
 ```
@@ -388,7 +379,6 @@ Matching produces:
 Trade 1
 quantity = 2
 price = 60,000
-
 Trade 2
 quantity = 3
 price = 60,500
@@ -457,6 +447,14 @@ pulseops/
 │       └── main.go
 │
 ├── internal/
+│   ├── httpapi/
+│   │   ├── health.go
+│   │   ├── health_test.go
+│   │   ├── response.go
+│   │   ├── response_test.go
+│   │   ├── router.go
+│   │   └── router_test.go
+│   │
 │   └── orders/
 │       ├── matching_engine.go
 │       ├── matching_engine_test.go
@@ -483,30 +481,32 @@ pulseops/
 └── README.md
 ```
 
-The `internal/orders` package currently contains the trading domain and the first in-memory matching implementation.
+The `internal/httpapi` package contains the current HTTP infrastructure, while `internal/orders` contains the trading domain and the first in-memory matching implementation.
 
 Responsibilities are separated as follows:
 
 ```text
+httpapi/router.go
+→ standard-library HTTP routing with ServeMux
+httpapi/health.go
+→ GET /healthz liveness handler
+httpapi/response.go
+→ JSON response and standardized error helpers
 order.go
 → Order entity and construction
-
 order_lifecycle.go
 → order transitions, cancellation, and fills
-
 trade.go
 → immutable trade execution records
-
 order_book.go
 → in-memory bids, asks, ordering, and cancellation
-
 matching_engine.go
 → matching crossed orders and producing trades
 ```
 
-Tests are colocated with their corresponding domain components.
+Tests are colocated with their corresponding HTTP and domain components.
 
-The architecture will continue to evolve as HTTP, persistence, concurrency, Redis, observability, and infrastructure are introduced.
+The architecture will continue to evolve as the trading HTTP API, persistence, concurrency, Redis, observability, and infrastructure are introduced.
 
 ## Current Limitations
 
@@ -522,7 +522,7 @@ Current limitations include:
 - the order book is not currently safe for concurrent access from multiple goroutines
 - no PostgreSQL persistence exists yet
 - no Redis integration exists yet
-- no external HTTP API exists yet
+- the trading HTTP API has not been implemented yet
 
 These limitations will be addressed progressively rather than adding infrastructure before the corresponding problem exists.
 
@@ -568,13 +568,9 @@ go version
 go run ./cmd/api
 ```
 
-Current output:
+This starts the HTTP server. The `GET /healthz` liveness endpoint is available.
 
-```text
-PulseOps trading service
-```
-
-The HTTP trading API has not been implemented yet.
+The trading HTTP API has not been implemented yet.
 
 ## Development Validation
 
@@ -651,15 +647,19 @@ Current tests cover behavior including:
 - resting BID execution price
 - matching-engine input validation
 - protecting against partial mutation when a counter-order is invalid
+- `GET /healthz` handler behavior
+- JSON response helpers
+- standardized JSON error responses
+- HTTP routing using `net/http/httptest`
 
 Coverage is used as feedback rather than as the sole measure of test quality.
 
 ## Roadmap
 
-The next major milestones are introducing the HTTP API and evolving the matching engine toward controlled concurrent processing.
+The next major milestones are implementing the trading HTTP API and evolving the matching engine toward controlled concurrent processing.
 
 Subsequent phases will introduce PostgreSQL persistence, transactional consistency, idempotency, Redis, observability, CI/CD, and deployment infrastructure.
 
 ## License
 
-A license has not been selected yet.
+This project is licensed under the MIT License. See the `LICENSE` file for details.

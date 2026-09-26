@@ -28,7 +28,6 @@ func mustNewTestOrder(t *testing.T) *Order {
 		Quantity(5_000_000),
 		createdAt,
 	)
-
 	if err != nil {
 		t.Fatalf("creating test order: %v", err)
 	}

@@ -2,14 +2,11 @@ package orders
 
 import (
 	"errors"
-
 	"testing"
-
 	"time"
 )
 
 func newOpenOrderForMatching(
-
 	t *testing.T,
 
 	id string,
@@ -21,9 +18,7 @@ func newOpenOrderForMatching(
 	price Price,
 
 	quantity Quantity,
-
 ) *Order {
-
 	t.Helper()
 
 	createdAt := time.Date(
@@ -59,38 +54,31 @@ func newOpenOrderForMatching(
 
 		createdAt,
 	)
-
 	if err != nil {
-
 		t.Fatalf(
 
 			"failed to create order: %v",
 
 			err,
 		)
-
 	}
 
 	if err := order.Open(
 
 		createdAt.Add(time.Second),
 	); err != nil {
-
 		t.Fatalf(
 
 			"failed to open order: %v",
 
 			err,
 		)
-
 	}
 
 	return order
-
 }
 
 func TestMatchingEngineDoesNotMatchUncrossedBook(t *testing.T) {
-
 	book := NewOrderBook()
 
 	engine := NewMatchingEngine()
@@ -126,15 +114,11 @@ func TestMatchingEngineDoesNotMatchUncrossedBook(t *testing.T) {
 	)
 
 	if err := book.Add(buy); err != nil {
-
 		t.Fatalf("unexpected error: %v", err)
-
 	}
 
 	if err := book.Add(sell); err != nil {
-
 		t.Fatalf("unexpected error: %v", err)
-
 	}
 
 	trades, err := engine.Match(
@@ -160,50 +144,39 @@ func TestMatchingEngineDoesNotMatchUncrossedBook(t *testing.T) {
 			time.UTC,
 		),
 	)
-
 	if err != nil {
-
 		t.Fatalf("unexpected error: %v", err)
-
 	}
 
 	if len(trades) != 0 {
-
 		t.Fatalf(
 
 			"expected 0 trades, got %d",
 
 			len(trades),
 		)
-
 	}
 
 	if buy.Status() != OrderStatusOpen {
-
 		t.Errorf(
 
 			"expected buy order OPEN, got %s",
 
 			buy.Status(),
 		)
-
 	}
 
 	if sell.Status() != OrderStatusOpen {
-
 		t.Errorf(
 
 			"expected sell order OPEN, got %s",
 
 			sell.Status(),
 		)
-
 	}
-
 }
 
 func TestMatchingEngineCompletesEqualQuantityOrders(t *testing.T) {
-
 	book := NewOrderBook()
 
 	engine := NewMatchingEngine()
@@ -239,15 +212,11 @@ func TestMatchingEngineCompletesEqualQuantityOrders(t *testing.T) {
 	)
 
 	if err := book.Add(sell); err != nil {
-
 		t.Fatalf("unexpected error: %v", err)
-
 	}
 
 	if err := book.Add(buy); err != nil {
-
 		t.Fatalf("unexpected error: %v", err)
-
 	}
 
 	trades, err := engine.Match(
@@ -273,28 +242,22 @@ func TestMatchingEngineCompletesEqualQuantityOrders(t *testing.T) {
 			time.UTC,
 		),
 	)
-
 	if err != nil {
-
 		t.Fatalf("unexpected error: %v", err)
-
 	}
 
 	if len(trades) != 1 {
-
 		t.Fatalf(
 
 			"expected 1 trade, got %d",
 
 			len(trades),
 		)
-
 	}
 
 	trade := trades[0]
 
 	if trade.Quantity() != Quantity(5_000_000) {
-
 		t.Errorf(
 
 			"expected quantity %d, got %d",
@@ -303,11 +266,9 @@ func TestMatchingEngineCompletesEqualQuantityOrders(t *testing.T) {
 
 			trade.Quantity(),
 		)
-
 	}
 
 	if trade.Price() != Price(6_000_000) {
-
 		t.Errorf(
 
 			"expected resting ask price %d, got %d",
@@ -316,53 +277,43 @@ func TestMatchingEngineCompletesEqualQuantityOrders(t *testing.T) {
 
 			trade.Price(),
 		)
-
 	}
 
 	if buy.Status() != OrderStatusFilled {
-
 		t.Errorf(
 
 			"expected buy FILLED, got %s",
 
 			buy.Status(),
 		)
-
 	}
 
 	if sell.Status() != OrderStatusFilled {
-
 		t.Errorf(
 
 			"expected sell FILLED, got %s",
 
 			sell.Status(),
 		)
-
 	}
 
 	if len(book.Bids()) != 0 {
-
 		t.Errorf(
 
 			"expected 0 bids, got %d",
 
 			len(book.Bids()),
 		)
-
 	}
 
 	if len(book.Asks()) != 0 {
-
 		t.Errorf(
 
 			"expected 0 asks, got %d",
 
 			len(book.Asks()),
 		)
-
 	}
-
 }
 
 func TestMatchingEngineUsesRestingBidPrice(t *testing.T) {
@@ -417,7 +368,6 @@ func TestMatchingEngineUsesRestingBidPrice(t *testing.T) {
 }
 
 func TestMatchingEngineSupportsPartialFill(t *testing.T) {
-
 	book := NewOrderBook()
 
 	engine := NewMatchingEngine()
@@ -453,15 +403,11 @@ func TestMatchingEngineSupportsPartialFill(t *testing.T) {
 	)
 
 	if err := book.Add(sell); err != nil {
-
 		t.Fatalf("unexpected error: %v", err)
-
 	}
 
 	if err := book.Add(buy); err != nil {
-
 		t.Fatalf("unexpected error: %v", err)
-
 	}
 
 	trades, err := engine.Match(
@@ -487,26 +433,20 @@ func TestMatchingEngineSupportsPartialFill(t *testing.T) {
 			time.UTC,
 		),
 	)
-
 	if err != nil {
-
 		t.Fatalf("unexpected error: %v", err)
-
 	}
 
 	if len(trades) != 1 {
-
 		t.Fatalf(
 
 			"expected 1 trade, got %d",
 
 			len(trades),
 		)
-
 	}
 
 	if trades[0].Quantity() != Quantity(2_000_000) {
-
 		t.Errorf(
 
 			"expected trade quantity %d, got %d",
@@ -515,33 +455,27 @@ func TestMatchingEngineSupportsPartialFill(t *testing.T) {
 
 			trades[0].Quantity(),
 		)
-
 	}
 
 	if sell.Status() != OrderStatusFilled {
-
 		t.Errorf(
 
 			"expected sell FILLED, got %s",
 
 			sell.Status(),
 		)
-
 	}
 
 	if buy.Status() != OrderStatusPartiallyFilled {
-
 		t.Errorf(
 
 			"expected buy PARTIALLY_FILLED, got %s",
 
 			buy.Status(),
 		)
-
 	}
 
 	if buy.RemainingQuantity() != Quantity(3_000_000) {
-
 		t.Errorf(
 
 			"expected remaining quantity %d, got %d",
@@ -550,35 +484,28 @@ func TestMatchingEngineSupportsPartialFill(t *testing.T) {
 
 			buy.RemainingQuantity(),
 		)
-
 	}
 
 	if len(book.Bids()) != 1 {
-
 		t.Errorf(
 
 			"expected 1 remaining bid, got %d",
 
 			len(book.Bids()),
 		)
-
 	}
 
 	if len(book.Asks()) != 0 {
-
 		t.Errorf(
 
 			"expected 0 asks, got %d",
 
 			len(book.Asks()),
 		)
-
 	}
-
 }
 
 func TestMatchingEngineMatchesAgainstMultipleOrders(t *testing.T) {
-
 	book := NewOrderBook()
 
 	engine := NewMatchingEngine()
@@ -629,21 +556,15 @@ func TestMatchingEngineMatchesAgainstMultipleOrders(t *testing.T) {
 	)
 
 	if err := book.Add(sellOne); err != nil {
-
 		t.Fatalf("unexpected error: %v", err)
-
 	}
 
 	if err := book.Add(sellTwo); err != nil {
-
 		t.Fatalf("unexpected error: %v", err)
-
 	}
 
 	if err := book.Add(buy); err != nil {
-
 		t.Fatalf("unexpected error: %v", err)
-
 	}
 
 	trades, err := engine.Match(
@@ -669,26 +590,20 @@ func TestMatchingEngineMatchesAgainstMultipleOrders(t *testing.T) {
 			time.UTC,
 		),
 	)
-
 	if err != nil {
-
 		t.Fatalf("unexpected error: %v", err)
-
 	}
 
 	if len(trades) != 2 {
-
 		t.Fatalf(
 
 			"expected 2 trades, got %d",
 
 			len(trades),
 		)
-
 	}
 
 	if trades[0].Quantity() != Quantity(2_000_000) {
-
 		t.Errorf(
 
 			"expected first trade quantity %d, got %d",
@@ -697,11 +612,9 @@ func TestMatchingEngineMatchesAgainstMultipleOrders(t *testing.T) {
 
 			trades[0].Quantity(),
 		)
-
 	}
 
 	if trades[1].Quantity() != Quantity(3_000_000) {
-
 		t.Errorf(
 
 			"expected second trade quantity %d, got %d",
@@ -710,11 +623,9 @@ func TestMatchingEngineMatchesAgainstMultipleOrders(t *testing.T) {
 
 			trades[1].Quantity(),
 		)
-
 	}
 
 	if trades[0].Price() != Price(6_000_000) {
-
 		t.Errorf(
 
 			"expected first trade price %d, got %d",
@@ -723,11 +634,9 @@ func TestMatchingEngineMatchesAgainstMultipleOrders(t *testing.T) {
 
 			trades[0].Price(),
 		)
-
 	}
 
 	if trades[1].Price() != Price(6_050_000) {
-
 		t.Errorf(
 
 			"expected second trade price %d, got %d",
@@ -736,42 +645,34 @@ func TestMatchingEngineMatchesAgainstMultipleOrders(t *testing.T) {
 
 			trades[1].Price(),
 		)
-
 	}
 
 	if buy.Status() != OrderStatusFilled {
-
 		t.Errorf(
 
 			"expected buy FILLED, got %s",
 
 			buy.Status(),
 		)
-
 	}
 
 	if sellOne.Status() != OrderStatusFilled {
-
 		t.Errorf(
 
 			"expected first sell FILLED, got %s",
 
 			sellOne.Status(),
 		)
-
 	}
 
 	if sellTwo.Status() != OrderStatusFilled {
-
 		t.Errorf(
 
 			"expected second sell FILLED, got %s",
 
 			sellTwo.Status(),
 		)
-
 	}
-
 }
 
 func TestMatchingEngineRejectsNilOrderBook(t *testing.T) {
@@ -806,11 +707,8 @@ func TestMatchingEngineRejectsZeroTime(t *testing.T) {
 }
 
 func TestMatchingEngineDoesNotPartiallyMutateOnInvalidCounterOrder(
-
 	t *testing.T,
-
 ) {
-
 	book := NewOrderBook()
 
 	engine := NewMatchingEngine()
@@ -865,38 +763,32 @@ func TestMatchingEngineDoesNotPartiallyMutateOnInvalidCounterOrder(
 	)
 
 	if err := book.Add(sell); err != nil {
-
 		t.Fatalf(
 
 			"unexpected error adding sell: %v",
 
 			err,
 		)
-
 	}
 
 	if err := book.Add(buy); err != nil {
-
 		t.Fatalf(
 
 			"unexpected error adding buy: %v",
 
 			err,
 		)
-
 	}
 
 	cancelAt := createdAt.Add(2 * time.Minute)
 
 	if err := sell.Cancel(cancelAt); err != nil {
-
 		t.Fatalf(
 
 			"failed to cancel sell order: %v",
 
 			err,
 		)
-
 	}
 
 	matchAt := createdAt.Add(3 * time.Minute)
@@ -909,13 +801,10 @@ func TestMatchingEngineDoesNotPartiallyMutateOnInvalidCounterOrder(
 	)
 
 	if err == nil {
-
 		t.Fatal("expected matching error")
-
 	}
 
 	if !errors.Is(err, ErrInvalidOrderTransition) {
-
 		t.Fatalf(
 
 			"expected %v, got %v",
@@ -924,22 +813,18 @@ func TestMatchingEngineDoesNotPartiallyMutateOnInvalidCounterOrder(
 
 			err,
 		)
-
 	}
 
 	if len(trades) != 0 {
-
 		t.Fatalf(
 
 			"expected 0 trades, got %d",
 
 			len(trades),
 		)
-
 	}
 
 	if buy.Status() != OrderStatusOpen {
-
 		t.Errorf(
 
 			"expected buy status %s, got %s",
@@ -948,22 +833,18 @@ func TestMatchingEngineDoesNotPartiallyMutateOnInvalidCounterOrder(
 
 			buy.Status(),
 		)
-
 	}
 
 	if buy.FilledQuantity() != 0 {
-
 		t.Errorf(
 
 			"expected buy filled quantity 0, got %d",
 
 			buy.FilledQuantity(),
 		)
-
 	}
 
 	if buy.RemainingQuantity() != Quantity(5_000_000) {
-
 		t.Errorf(
 
 			"expected buy remaining quantity %d, got %d",
@@ -972,11 +853,9 @@ func TestMatchingEngineDoesNotPartiallyMutateOnInvalidCounterOrder(
 
 			buy.RemainingQuantity(),
 		)
-
 	}
 
 	if sell.Status() != OrderStatusCancelled {
-
 		t.Errorf(
 
 			"expected sell status %s, got %s",
@@ -985,18 +864,14 @@ func TestMatchingEngineDoesNotPartiallyMutateOnInvalidCounterOrder(
 
 			sell.Status(),
 		)
-
 	}
 
 	if sell.FilledQuantity() != 0 {
-
 		t.Errorf(
 
 			"expected sell filled quantity 0, got %d",
 
 			sell.FilledQuantity(),
 		)
-
 	}
-
 }

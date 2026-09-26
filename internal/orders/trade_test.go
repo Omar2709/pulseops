@@ -27,7 +27,6 @@ func TestNewTrade(t *testing.T) {
 		Quantity(5_000_000),
 		executedAt,
 	)
-
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

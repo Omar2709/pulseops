@@ -97,7 +97,6 @@ func (e *MatchingEngine) Match(
 			quantity,
 			at,
 		)
-
 		if err != nil {
 			return trades, fmt.Errorf(
 				"create trade: %w",
