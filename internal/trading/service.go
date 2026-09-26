@@ -1,0 +1,129 @@
+package trading
+
+import (
+	"errors"
+	"time"
+
+	"github.com/Omar2709/pulseops/internal/orders"
+)
+
+var ErrDuplicateOrder = errors.New("order already exists")
+
+type SubmitOrderInput struct {
+	ID       string
+	Symbol   string
+	Side     orders.Side
+	Price    orders.Price
+	Quantity orders.Quantity
+}
+
+type OrderSnapshot struct {
+	ID                string
+	Symbol            string
+	Side              orders.Side
+	Price             orders.Price
+	Quantity          orders.Quantity
+	FilledQuantity    orders.Quantity
+	RemainingQuantity orders.Quantity
+	Status            orders.OrderStatus
+	CreatedAt         time.Time
+	UpdatedAt         time.Time
+}
+
+func snapshotOrder(order *orders.Order) OrderSnapshot {
+	return OrderSnapshot{
+		ID:                order.ID(),
+		Symbol:            order.Symbol(),
+		Side:              order.Side(),
+		Price:             order.Price(),
+		Quantity:          order.Quantity(),
+		FilledQuantity:    order.FilledQuantity(),
+		RemainingQuantity: order.RemainingQuantity(),
+		Status:            order.Status(),
+		CreatedAt:         order.CreatedAt(),
+		UpdatedAt:         order.UpdatedAt(),
+	}
+}
+
+type SubmitOrderResult struct {
+	Order  OrderSnapshot
+	Trades []*orders.Trade
+}
+
+type Service struct {
+	books  map[string]*orders.OrderBook
+	orders map[string]*orders.Order
+	engine *orders.MatchingEngine
+	now    func() time.Time
+}
+
+func NewService() *Service {
+	return newService(func() time.Time {
+		return time.Now().UTC()
+	})
+}
+
+func newService(now func() time.Time) *Service {
+	return &Service{
+		books:  make(map[string]*orders.OrderBook),
+		orders: make(map[string]*orders.Order),
+		engine: orders.NewMatchingEngine(),
+		now:    now,
+	}
+}
+
+func (s *Service) bookFor(symbol string) *orders.OrderBook {
+	book, exists := s.books[symbol]
+	if exists {
+		return book
+	}
+
+	book = orders.NewOrderBook()
+	s.books[symbol] = book
+
+	return book
+}
+
+func (s *Service) SubmitOrder(
+	input SubmitOrderInput,
+) (SubmitOrderResult, error) {
+	at := s.now()
+
+	order, err := orders.NewOrder(
+		input.ID,
+		input.Symbol,
+		input.Side,
+		input.Price,
+		input.Quantity,
+		at,
+	)
+	if err != nil {
+		return SubmitOrderResult{}, err
+	}
+
+	if _, exists := s.orders[order.ID()]; exists {
+		return SubmitOrderResult{}, ErrDuplicateOrder
+	}
+
+	if err := order.Open(at); err != nil {
+		return SubmitOrderResult{}, err
+	}
+
+	book := s.bookFor(order.Symbol())
+
+	if err := book.Add(order); err != nil {
+		return SubmitOrderResult{}, err
+	}
+
+	s.orders[order.ID()] = order
+
+	trades, err := s.engine.Match(book, at)
+	if err != nil {
+		return SubmitOrderResult{}, err
+	}
+
+	return SubmitOrderResult{
+		Order:  snapshotOrder(order),
+		Trades: trades,
+	}, nil
+}
