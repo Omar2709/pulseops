@@ -2,6 +2,7 @@ package trading
 
 import (
 	"errors"
+	"sync"
 	"time"
 
 	"github.com/Omar2709/pulseops/internal/orders"
@@ -51,6 +52,7 @@ type SubmitOrderResult struct {
 }
 
 type Service struct {
+	mu     sync.Mutex
 	books  map[string]*orders.OrderBook
 	orders map[string]*orders.Order
 	engine *orders.MatchingEngine
@@ -72,6 +74,7 @@ func newService(now func() time.Time) *Service {
 	}
 }
 
+// bookFor must be called while holding s.mu.
 func (s *Service) bookFor(symbol string) *orders.OrderBook {
 	book, exists := s.books[symbol]
 	if exists {
@@ -87,6 +90,9 @@ func (s *Service) bookFor(symbol string) *orders.OrderBook {
 func (s *Service) SubmitOrder(
 	input SubmitOrderInput,
 ) (SubmitOrderResult, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	at := s.now()
 
 	order, err := orders.NewOrder(

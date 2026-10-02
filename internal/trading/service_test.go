@@ -2,6 +2,8 @@ package trading
 
 import (
 	"errors"
+	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -108,7 +110,9 @@ func TestSubmitOrderMatchesCrossingOrders(t *testing.T) {
 	}
 }
 
-func TestSubmitOrderRejectsDuplicateIDWithoutChangingState(t *testing.T) {
+func TestSubmitOrderRejectsDuplicateIDWithoutChangingState(
+	t *testing.T,
+) {
 	now := testTime()
 	service := newService(func() time.Time {
 		return now
@@ -173,7 +177,9 @@ func TestSubmitOrderRejectsDuplicateIDWithoutChangingState(t *testing.T) {
 	}
 }
 
-func TestSubmitOrderUsesIndependentBooksPerSymbol(t *testing.T) {
+func TestSubmitOrderUsesIndependentBooksPerSymbol(
+	t *testing.T,
+) {
 	now := testTime()
 	service := newService(func() time.Time {
 		return now
@@ -223,7 +229,9 @@ func TestSubmitOrderUsesIndependentBooksPerSymbol(t *testing.T) {
 	}
 }
 
-func TestSubmitOrderKeepsFilledOrdersInRegistryAndRemovesThemFromBook(t *testing.T) {
+func TestSubmitOrderKeepsFilledOrdersInRegistryAndRemovesThemFromBook(
+	t *testing.T,
+) {
 	now := testTime()
 	service := newService(func() time.Time {
 		return now
@@ -289,6 +297,70 @@ func TestSubmitOrderKeepsFilledOrdersInRegistryAndRemovesThemFromBook(t *testing
 	}
 
 	if len(book.Bids()) != 0 || len(book.Asks()) != 0 {
-		t.Fatal("expected filled orders to be removed from the order book")
+		t.Fatal(
+			"expected filled orders to be removed from the order book",
+		)
+	}
+}
+
+func TestSubmitOrderConcurrentRequests(t *testing.T) {
+	service := NewService()
+
+	const total = 32
+
+	var wg sync.WaitGroup
+	errs := make(chan error, total)
+
+	for i := 0; i < total; i++ {
+		wg.Add(1)
+
+		go func(index int) {
+			defer wg.Done()
+
+			_, err := service.SubmitOrder(
+				SubmitOrderInput{
+					ID: fmt.Sprintf(
+						"buy-%03d",
+						index,
+					),
+					Symbol:   "BTCUSD",
+					Side:     orders.SideBuy,
+					Price:    orders.Price(6_000_000),
+					Quantity: orders.Quantity(5_000_000),
+				},
+			)
+
+			errs <- err
+		}(i)
+	}
+
+	wg.Wait()
+	close(errs)
+
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent submission: %v", err)
+		}
+	}
+
+	if got := len(service.orders); got != total {
+		t.Errorf(
+			"expected %d registered orders, got %d",
+			total,
+			got,
+		)
+	}
+
+	book := service.books["BTCUSD"]
+	if book == nil {
+		t.Fatal("expected BTCUSD order book")
+	}
+
+	if got := len(book.Bids()); got != total {
+		t.Errorf(
+			"expected %d bids, got %d",
+			total,
+			got,
+		)
 	}
 }

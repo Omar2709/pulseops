@@ -6,11 +6,17 @@ import (
 	"time"
 
 	"github.com/Omar2709/pulseops/internal/httpapi"
+	"github.com/Omar2709/pulseops/internal/trading"
 )
 
 func main() {
-	router := httpapi.NewRouter()
+	// Create the shared trading service.
+	tradingService := trading.NewService()
 
+	// Configure the HTTP router.
+	router := httpapi.NewRouter(tradingService)
+
+	// Configure the HTTP server.
 	server := &http.Server{
 		Addr:              ":8080",
 		Handler:           router,
@@ -22,6 +28,7 @@ func main() {
 
 	log.Println("PulseOps API listening on :8080")
 
+	// Start the HTTP server.
 	if err := server.ListenAndServe(); err != nil &&
 		err != http.ErrServerClosed {
 		log.Fatalf("HTTP server failed: %v", err)

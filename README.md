@@ -4,13 +4,13 @@ PulseOps is a trading and order-matching backend built with Go.
 
 The project is being developed progressively to explore production-oriented backend engineering concepts including domain modeling, order matching, concurrency, transactional consistency, idempotency, PostgreSQL, Redis, observability, Docker, Kubernetes, and CI/CD.
 
-The current implementation provides an in-memory, sequential matching engine. Controlled concurrent processing will be introduced in a later phase.
+The current implementation provides an in-memory trading application service, a sequential matching engine, and an HTTP API for submitting limit orders. Order submission is serialized using a mutex; controlled concurrent matching will be introduced in a later phase.
 
 > PulseOps is an educational trading-system simulation. It is not intended for real-money trading.
 
 ## Current Status
 
-PulseOps currently implements the core trading domain and an in-memory order-matching engine.
+PulseOps currently implements the core trading domain, an in-memory order-matching engine, and HTTP order submission.
 
 Implemented:
 
@@ -45,8 +45,19 @@ Implemented:
 - JSON response helpers
 - Standardized JSON error responses
 - HTTP handler tests using `net/http/httptest`
+- In-memory trading application service
+- Order submission and duplicate ID detection
+- Order snapshots to prevent external entity mutation
+- Injectable application clock
+- In-memory order registry
+- Independent order books per symbol
+- Mutex-protected order submission
+- Fixed-point decimal parsing without floating-point arithmetic
+- `POST /v1/orders` endpoint
+- HTTP request validation and body size limits
+- HTTP integration tests for order submission and matching
 
-The trading HTTP API, persistence layer, controlled concurrent processing, Redis integration, observability, and deployment infrastructure will be introduced progressively.
+Order lookup and cancellation endpoints, persistence, controlled concurrent matching, Redis integration, observability, and deployment infrastructure will be introduced progressively.
 
 ## Domain
 
@@ -448,40 +459,49 @@ pulseops/
 │
 ├── internal/
 │   ├── httpapi/
+│   │   ├── decimal.go
+│   │   ├── decimal_test.go
 │   │   ├── health.go
 │   │   ├── health_test.go
+│   │   ├── orders.go
+│   │   ├── orders_test.go
 │   │   ├── response.go
 │   │   ├── response_test.go
 │   │   ├── router.go
 │   │   └── router_test.go
 │   │
-│   └── orders/
-│       ├── matching_engine.go
-│       ├── matching_engine_test.go
-│       ├── order.go
-│       ├── order_test.go
-│       ├── order_book.go
-│       ├── order_book_test.go
-│       ├── order_lifecycle.go
-│       ├── order_lifecycle_test.go
-│       ├── price.go
-│       ├── price_test.go
-│       ├── quantity.go
-│       ├── quantity_test.go
-│       ├── side.go
-│       ├── side_test.go
-│       ├── status.go
-│       ├── status_test.go
-│       ├── trade.go
-│       └── trade_test.go
+│   ├── orders/
+│   │   ├── matching_engine.go
+│   │   ├── matching_engine_test.go
+│   │   ├── order.go
+│   │   ├── order_test.go
+│   │   ├── order_book.go
+│   │   ├── order_book_test.go
+│   │   ├── order_lifecycle.go
+│   │   ├── order_lifecycle_test.go
+│   │   ├── price.go
+│   │   ├── price_test.go
+│   │   ├── quantity.go
+│   │   ├── quantity_test.go
+│   │   ├── side.go
+│   │   ├── side_test.go
+│   │   ├── status.go
+│   │   ├── status_test.go
+│   │   ├── trade.go
+│   │   └── trade_test.go
+│   │
+│   └── trading/
+│       ├── service.go
+│       └── service_test.go
 │
 ├── .gitattributes
 ├── .gitignore
+├── LICENSE
 ├── go.mod
 └── README.md
 ```
 
-The `internal/httpapi` package contains the current HTTP infrastructure, while `internal/orders` contains the trading domain and the first in-memory matching implementation.
+The `internal/httpapi` package contains HTTP routing, decimal parsing, handlers, and response helpers. The `internal/orders` package contains the trading domain and the in-memory matching engine. The `internal/trading` package coordinates order submission and matching through an in-memory application service.
 
 Responsibilities are separated as follows:
 
@@ -490,8 +510,14 @@ httpapi/router.go
 → standard-library HTTP routing with ServeMux
 httpapi/health.go
 → GET /healthz liveness handler
+httpapi/orders.go
+→ POST /v1/orders validation, submission, and response mapping
+httpapi/decimal.go
+→ strict fixed-point decimal parsing without float64
 httpapi/response.go
 → JSON response and standardized error helpers
+trading/service.go
+→ order registry, independent symbol books, matching coordination, and snapshots
 order.go
 → Order entity and construction
 order_lifecycle.go
@@ -504,9 +530,63 @@ matching_engine.go
 → matching crossed orders and producing trades
 ```
 
-Tests are colocated with their corresponding HTTP and domain components.
+Tests are colocated with their corresponding HTTP, application-service, and domain components.
 
-The architecture will continue to evolve as the trading HTTP API, persistence, concurrency, Redis, observability, and infrastructure are introduced.
+The architecture will continue to evolve with order lookup and cancellation endpoints, persistence, controlled concurrent matching, Redis, observability, and infrastructure.
+
+## HTTP API
+
+### Submit Order
+
+`POST /v1/orders`
+
+The endpoint accepts limit orders using decimal strings for price and quantity. Binary floating-point arithmetic is not used.
+
+Example request:
+
+```json
+{
+  "id": "buy-001",
+  "symbol": "BTCUSD",
+  "side": "BUY",
+  "price": "60000.25",
+  "quantity": "0.05"
+}
+```
+
+Successful requests return `201 Created`. If no compatible counter-order is available, the new order remains `OPEN`; otherwise, the matching engine may partially or completely fill it.
+
+Example response when no compatible counter-order is available (timestamps vary):
+
+```json
+{
+  "id": "buy-001",
+  "symbol": "BTCUSD",
+  "side": "BUY",
+  "price_units": "6000025",
+  "quantity_units": "5000000",
+  "filled_units": "0",
+  "remaining_units": "5000000",
+  "status": "OPEN",
+  "created_at": "2026-10-02T14:00:28Z",
+  "updated_at": "2026-10-02T14:00:28Z"
+}
+```
+
+Prices and quantities are returned as fixed-point internal units. These values are encoded as JSON strings to preserve integer precision across different HTTP clients. Responses are snapshots reflecting the state at the time of submission; they do not update when later orders are matched.
+
+The endpoint supports automatic matching against compatible resting orders within the same symbol.
+
+Validation includes malformed JSON, unknown fields, invalid domain values, duplicate order IDs, unsupported media types, and oversized request bodies. The request body limit is 16 KiB. Common responses include:
+
+- `201 Created`: accepted order, including its state after the current matching attempt
+- `400 Bad Request`: malformed JSON or invalid request/domain values
+- `405 Method Not Allowed`: unsupported HTTP method for this route
+- `409 Conflict`: duplicate order ID
+- `413 Request Entity Too Large`: request body exceeds the limit
+- `415 Unsupported Media Type`: request is not sent as `application/json`
+
+Order lookup and cancellation are not yet exposed through HTTP. This API has no authentication or authorization and must not be exposed publicly as a trading service.
 
 ## Current Limitations
 
@@ -514,15 +594,18 @@ The current matching engine intentionally prioritizes correctness and domain mod
 
 Current limitations include:
 
-- state is stored only in memory
-- matching is sequential
-- order-book data structures are not optimized for very large books
-- trade IDs are generated using an in-memory sequence
-- trade ID sequences are not durable across process restarts
-- the order book is not currently safe for concurrent access from multiple goroutines
-- no PostgreSQL persistence exists yet
-- no Redis integration exists yet
-- the trading HTTP API has not been implemented yet
+- Application state is stored only in memory.
+- Matching is sequential.
+- Order submission is currently serialized using a mutex.
+- The order book is not safe for unsynchronized concurrent access outside the application service.
+- Matching failures do not currently provide transactional rollback across an entire submission; an order may already be registered when a later matching step fails.
+- Order-book data structures are not optimized for very large books.
+- Trade IDs are generated using an in-memory sequence and are not durable across process restarts.
+- No PostgreSQL persistence or Redis integration exists yet.
+- HTTP order lookup and cancellation have not yet been implemented.
+- Authentication and authorization have not yet been implemented.
+- The HTTP API is intended for educational simulation, not production trading.
+- The concurrency test for the service has passed, but the Go race detector has not yet been run for this block.
 
 These limitations will be addressed progressively rather than adding infrastructure before the corresponding problem exists.
 
@@ -530,8 +613,7 @@ These limitations will be addressed progressively rather than adding infrastruct
 
 PulseOps is planned to include:
 
-- REST API using `net/http` and Chi
-- BUY and SELL order endpoints
+- Additional REST endpoints using `net/http` (with optional routing libraries if needed)
 - Order lookup and cancellation endpoints
 - Best bid / best ask market quotes
 - PostgreSQL persistence
@@ -568,9 +650,27 @@ go version
 go run ./cmd/api
 ```
 
-This starts the HTTP server. The `GET /healthz` liveness endpoint is available.
+This starts the HTTP server. The `GET /healthz` liveness endpoint and `POST /v1/orders` submission endpoint are available on port `8080` by default.
 
-The trading HTTP API has not been implemented yet.
+To submit an example order from PowerShell:
+
+```powershell
+$body = @{
+    id       = "buy-001"
+    symbol   = "BTCUSD"
+    side     = "BUY"
+    price    = "60000.25"
+    quantity = "0.05"
+} | ConvertTo-Json
+
+Invoke-RestMethod `
+    -Uri "http://localhost:8080/v1/orders" `
+    -Method POST `
+    -ContentType "application/json" `
+    -Body $body
+```
+
+The in-memory order registry resets when the process restarts. Reusing an order ID during one process lifetime returns `409 Conflict`.
 
 ## Development Validation
 
@@ -604,13 +704,32 @@ Run verbose domain tests:
 go test -v ./internal/orders
 ```
 
+Run HTTP integration tests and measure HTTP package coverage:
+
+```bash
+go test -v ./internal/httpapi
+go test -cover ./internal/httpapi
+```
+
+Run application-service tests:
+
+```bash
+go test -v ./internal/trading
+```
+
+When a compatible C compiler is available, run the Go race detector:
+
+```bash
+go test -race ./...
+```
+
+Passing the concurrent submission unit test does not establish that the program is race-free. Race detector validation has not yet been completed for this block; it is also planned for CI.
+
 Check whitespace and formatting problems before committing:
 
 ```bash
 git diff --check
 ```
-
-The Go race detector will become part of the validation workflow once concurrent matching is introduced and CI runs in a compatible environment.
 
 ## Testing Philosophy
 
@@ -651,14 +770,20 @@ Current tests cover behavior including:
 - JSON response helpers
 - standardized JSON error responses
 - HTTP routing using `net/http/httptest`
+- fixed-point decimal parsing and overflow boundaries
+- HTTP order submission and fixed-point JSON serialization
+- HTTP input validation and expected status codes
+- duplicate order rejection through HTTP
+- matching across successive HTTP requests
+- concurrent application-service order submission
 
 Coverage is used as feedback rather than as the sole measure of test quality.
 
 ## Roadmap
 
-The next major milestones are implementing the trading HTTP API and evolving the matching engine toward controlled concurrent processing.
+The next major milestones are HTTP order lookup and cancellation, followed by transactional consistency and controlled concurrent matching.
 
-Subsequent phases will introduce PostgreSQL persistence, transactional consistency, idempotency, Redis, observability, CI/CD, and deployment infrastructure.
+Subsequent phases will introduce PostgreSQL persistence, idempotency, Redis, observability, CI/CD, and deployment infrastructure.
 
 ## License
 

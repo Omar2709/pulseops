@@ -4,10 +4,14 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"github.com/Omar2709/pulseops/internal/trading"
 )
 
-func TestRouterReturnsNotFoundForUnknownRoute(t *testing.T) {
-	router := NewRouter()
+func TestRouterReturnsNotFoundForUnknownRoute(
+	t *testing.T,
+) {
+	router := NewRouter(trading.NewService())
 
 	request := httptest.NewRequest(
 		http.MethodGet,

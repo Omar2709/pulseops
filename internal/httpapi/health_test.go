@@ -5,10 +5,12 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"github.com/Omar2709/pulseops/internal/trading"
 )
 
 func TestHealthEndpoint(t *testing.T) {
-	router := NewRouter()
+	router := NewRouter(trading.NewService())
 
 	request := httptest.NewRequest(
 		http.MethodGet,
@@ -38,8 +40,13 @@ func TestHealthEndpoint(t *testing.T) {
 
 	var response healthResponse
 
-	if err := json.NewDecoder(recorder.Body).Decode(&response); err != nil {
-		t.Fatalf("decoding response body: %v", err)
+	if err := json.NewDecoder(
+		recorder.Body,
+	).Decode(&response); err != nil {
+		t.Fatalf(
+			"decoding response body: %v",
+			err,
+		)
 	}
 
 	if response.Status != "ok" {
@@ -52,7 +59,7 @@ func TestHealthEndpoint(t *testing.T) {
 }
 
 func TestHealthEndpointRejectsPost(t *testing.T) {
-	router := NewRouter()
+	router := NewRouter(trading.NewService())
 
 	request := httptest.NewRequest(
 		http.MethodPost,
