@@ -364,3 +364,113 @@ func TestSubmitOrderConcurrentRequests(t *testing.T) {
 		)
 	}
 }
+
+// Verify that GetOrder returns the current state after matching
+// and that snapshots cannot mutate the stored order.
+func TestGetOrderReturnsCurrentSnapshot(t *testing.T) {
+	now := testTime()
+
+	service := newService(func() time.Time {
+		return now
+	})
+
+	_, err := service.SubmitOrder(
+		SubmitOrderInput{
+			ID:       "sell-001",
+			Symbol:   "BTCUSD",
+			Side:     orders.SideSell,
+			Price:    orders.Price(6_000_000),
+			Quantity: orders.Quantity(5_000_000),
+		},
+	)
+	if err != nil {
+		t.Fatalf("submitting sell order: %v", err)
+	}
+
+	// Retrieve the order before matching.
+	initial, err := service.GetOrder(" sell-001 ")
+	if err != nil {
+		t.Fatalf("getting initial order: %v", err)
+	}
+
+	if initial.Status != orders.OrderStatusOpen {
+		t.Fatalf(
+			"expected OPEN, got %s",
+			initial.Status,
+		)
+	}
+
+	// Submit a compatible BUY order.
+	now = now.Add(time.Second)
+
+	_, err = service.SubmitOrder(
+		SubmitOrderInput{
+			ID:       "buy-001",
+			Symbol:   "BTCUSD",
+			Side:     orders.SideBuy,
+			Price:    orders.Price(6_100_000),
+			Quantity: orders.Quantity(5_000_000),
+		},
+	)
+	if err != nil {
+		t.Fatalf("submitting buy order: %v", err)
+	}
+
+	// Retrieve the previously registered SELL order.
+	current, err := service.GetOrder("sell-001")
+	if err != nil {
+		t.Fatalf("getting updated order: %v", err)
+	}
+
+	if current.Status != orders.OrderStatusFilled {
+		t.Errorf(
+			"expected FILLED, got %s",
+			current.Status,
+		)
+	}
+
+	if current.FilledQuantity != orders.Quantity(5_000_000) {
+		t.Errorf(
+			"unexpected filled quantity: %d",
+			current.FilledQuantity,
+		)
+	}
+
+	if current.RemainingQuantity != 0 {
+		t.Errorf(
+			"expected no remaining quantity, got %d",
+			current.RemainingQuantity,
+		)
+	}
+
+	// The previous snapshot must remain unchanged.
+	if initial.Status != orders.OrderStatusOpen {
+		t.Error("initial snapshot was unexpectedly modified")
+	}
+
+	// A caller must not be able to mutate stored state.
+	current.Status = orders.OrderStatusCancelled
+
+	unchanged, err := service.GetOrder("sell-001")
+	if err != nil {
+		t.Fatalf("getting stored order: %v", err)
+	}
+
+	if unchanged.Status != orders.OrderStatusFilled {
+		t.Error("stored order was modified through a snapshot")
+	}
+}
+
+// Verify that an unknown ID produces the expected application error.
+func TestGetOrderReturnsNotFound(t *testing.T) {
+	service := NewService()
+
+	_, err := service.GetOrder("unknown-order")
+
+	if !errors.Is(err, ErrOrderNotFound) {
+		t.Fatalf(
+			"expected ErrOrderNotFound, got %v",
+			err,
+		)
+	}
+}

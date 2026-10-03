@@ -2,13 +2,17 @@ package trading
 
 import (
 	"errors"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/Omar2709/pulseops/internal/orders"
 )
 
-var ErrDuplicateOrder = errors.New("order already exists")
+var (
+	ErrDuplicateOrder = errors.New("order already exists")
+	ErrOrderNotFound  = errors.New("order not found")
+)
 
 type SubmitOrderInput struct {
 	ID       string
@@ -52,7 +56,7 @@ type SubmitOrderResult struct {
 }
 
 type Service struct {
-	mu     sync.Mutex
+	mu     sync.RWMutex
 	books  map[string]*orders.OrderBook
 	orders map[string]*orders.Order
 	engine *orders.MatchingEngine
@@ -132,4 +136,22 @@ func (s *Service) SubmitOrder(
 		Order:  snapshotOrder(order),
 		Trades: trades,
 	}, nil
+}
+
+// GetOrder returns a snapshot of the current state of an order.
+// The registry retains filled orders even after they leave the book.
+func (s *Service) GetOrder(
+	id string,
+) (OrderSnapshot, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	id = strings.TrimSpace(id)
+
+	order, exists := s.orders[id]
+	if !exists {
+		return OrderSnapshot{}, ErrOrderNotFound
+	}
+
+	return snapshotOrder(order), nil
 }

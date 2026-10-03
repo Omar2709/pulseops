@@ -4,13 +4,13 @@ PulseOps is a trading and order-matching backend built with Go.
 
 The project is being developed progressively to explore production-oriented backend engineering concepts including domain modeling, order matching, concurrency, transactional consistency, idempotency, PostgreSQL, Redis, observability, Docker, Kubernetes, and CI/CD.
 
-The current implementation provides an in-memory trading application service, a sequential matching engine, and an HTTP API for submitting limit orders. Order submission is serialized using a mutex; controlled concurrent matching will be introduced in a later phase.
+The current implementation provides an in-memory trading application service, a sequential matching engine, and an HTTP API for submitting limit orders and retrieving their current state. Order submission and matching are serialized using an exclusive lock, while order lookup uses a read lock; controlled concurrent matching will be introduced in a later phase.
 
 > PulseOps is an educational trading-system simulation. It is not intended for real-money trading.
 
 ## Current Status
 
-PulseOps currently implements the core trading domain, an in-memory order-matching engine, and HTTP order submission.
+PulseOps currently implements the core trading domain, an in-memory order-matching engine, HTTP order submission, and order lookup by ID.
 
 Implemented:
 
@@ -48,16 +48,21 @@ Implemented:
 - In-memory trading application service
 - Order submission and duplicate ID detection
 - Order snapshots to prevent external entity mutation
+- Order lookup by ID
+- Current order-state retrieval after matching
+- Detached order snapshots that protect internal entity state
 - Injectable application clock
 - In-memory order registry
 - Independent order books per symbol
-- Mutex-protected order submission
+- Reader-writer synchronization using `sync.RWMutex`
 - Fixed-point decimal parsing without floating-point arithmetic
 - `POST /v1/orders` endpoint
+- `GET /v1/orders/{id}` endpoint
 - HTTP request validation and body size limits
 - HTTP integration tests for order submission and matching
+- HTTP integration tests for order lookup
 
-Order lookup and cancellation endpoints, persistence, controlled concurrent matching, Redis integration, observability, and deployment infrastructure will be introduced progressively.
+HTTP order cancellation, persistence, controlled concurrent matching, Redis integration, observability, and deployment infrastructure will be introduced progressively.
 
 ## Domain
 
@@ -464,6 +469,8 @@ pulseops/
 │   │   ├── health.go
 │   │   ├── health_test.go
 │   │   ├── orders.go
+│   │   ├── orders_get.go
+│   │   ├── orders_get_test.go
 │   │   ├── orders_test.go
 │   │   ├── response.go
 │   │   ├── response_test.go
@@ -501,7 +508,7 @@ pulseops/
 └── README.md
 ```
 
-The `internal/httpapi` package contains HTTP routing, decimal parsing, handlers, and response helpers. The `internal/orders` package contains the trading domain and the in-memory matching engine. The `internal/trading` package coordinates order submission and matching through an in-memory application service.
+The `internal/httpapi` package contains HTTP routing, decimal parsing, handlers, and response helpers. The `internal/orders` package contains the trading domain and the in-memory matching engine. The `internal/trading` package coordinates order submission, matching, and order lookup through an in-memory application service.
 
 Responsibilities are separated as follows:
 
@@ -511,13 +518,15 @@ httpapi/router.go
 httpapi/health.go
 → GET /healthz liveness handler
 httpapi/orders.go
-→ POST /v1/orders validation, submission, and response mapping
+→ POST /v1/orders validation, submission, and shared order response mapping
+httpapi/orders_get.go
+→ GET /v1/orders/{id}, lookup and HTTP response mapping
 httpapi/decimal.go
 → strict fixed-point decimal parsing without float64
 httpapi/response.go
 → JSON response and standardized error helpers
 trading/service.go
-→ order registry, independent symbol books, matching coordination, and snapshots
+→ order registry, independent symbol books, order submission, matching coordination, synchronized order lookup, and snapshots
 order.go
 → Order entity and construction
 order_lifecycle.go
@@ -532,7 +541,7 @@ matching_engine.go
 
 Tests are colocated with their corresponding HTTP, application-service, and domain components.
 
-The architecture will continue to evolve with order lookup and cancellation endpoints, persistence, controlled concurrent matching, Redis, observability, and infrastructure.
+The architecture will continue to evolve with HTTP cancellation, persistence, controlled concurrent matching, Redis, observability, and infrastructure.
 
 ## HTTP API
 
@@ -586,7 +595,37 @@ Validation includes malformed JSON, unknown fields, invalid domain values, dupli
 - `413 Request Entity Too Large`: request body exceeds the limit
 - `415 Unsupported Media Type`: request is not sent as `application/json`
 
-Order lookup and cancellation are not yet exposed through HTTP. This API has no authentication or authorization and must not be exposed publicly as a trading service.
+### Get Order
+
+`GET /v1/orders/{id}`
+
+Retrieves the current state of an order using its unique identifier.
+
+Example request:
+
+```http
+GET /v1/orders/buy-001
+```
+
+Successful requests return `200 OK` and use the same JSON response format as the order submission endpoint.
+
+Unlike the response returned when an order is submitted, this endpoint provides the order's current state, including any fills caused by subsequent matching operations.
+
+Orders are retrieved from the application service's order registry. Fully executed orders remain available even after being removed from the active order book.
+
+The application service uses `sync.RWMutex` to coordinate concurrent reads with order submissions and matching.
+
+Responses:
+
+- `200 OK`: the order exists.
+- `404 Not Found`: the order does not exist.
+- `405 Method Not Allowed`: the HTTP method is not supported.
+
+Go's standard `ServeMux` also accepts `HEAD` requests for routes registered with `GET`.
+
+Order lookup returns snapshots instead of exposing mutable domain entities. Data remains in memory and is lost when the application restarts.
+
+Authentication and authorization are not yet implemented. This API must not be exposed publicly in its current form.
 
 ## Current Limitations
 
@@ -596,16 +635,19 @@ Current limitations include:
 
 - Application state is stored only in memory.
 - Matching is sequential.
-- Order submission is currently serialized using a mutex.
+- Order submission and matching currently use an exclusive lock; order lookup uses a shared read lock.
 - The order book is not safe for unsynchronized concurrent access outside the application service.
 - Matching failures do not currently provide transactional rollback across an entire submission; an order may already be registered when a later matching step fails.
 - Order-book data structures are not optimized for very large books.
 - Trade IDs are generated using an in-memory sequence and are not durable across process restarts.
 - No PostgreSQL persistence or Redis integration exists yet.
-- HTTP order lookup and cancellation have not yet been implemented.
+- HTTP order cancellation has not yet been implemented.
 - Authentication and authorization have not yet been implemented.
 - The HTTP API is intended for educational simulation, not production trading.
-- The concurrency test for the service has passed, but the Go race detector has not yet been run for this block.
+- The Go race detector has not yet been executed
+  successfully in the current Windows environment
+  because CGO was disabled. Race detector validation
+  is planned for Linux CI.
 
 These limitations will be addressed progressively rather than adding infrastructure before the corresponding problem exists.
 
@@ -614,7 +656,7 @@ These limitations will be addressed progressively rather than adding infrastruct
 PulseOps is planned to include:
 
 - Additional REST endpoints using `net/http` (with optional routing libraries if needed)
-- Order lookup and cancellation endpoints
+- HTTP order cancellation endpoint
 - Best bid / best ask market quotes
 - PostgreSQL persistence
 - Database migrations
@@ -650,7 +692,7 @@ go version
 go run ./cmd/api
 ```
 
-This starts the HTTP server. The `GET /healthz` liveness endpoint and `POST /v1/orders` submission endpoint are available on port `8080` by default.
+This starts the HTTP server. The `GET /healthz` liveness endpoint, `POST /v1/orders` submission endpoint, and `GET /v1/orders/{id}` lookup endpoint are available on port `8080` by default.
 
 To submit an example order from PowerShell:
 
@@ -670,6 +712,14 @@ Invoke-RestMethod `
     -Body $body
 ```
 
+To retrieve the order's latest state:
+
+```powershell
+Invoke-RestMethod `
+    -Uri "http://localhost:8080/v1/orders/buy-001" `
+    -Method GET
+```
+
 The in-memory order registry resets when the process restarts. Reusing an order ID during one process lifetime returns `409 Conflict`.
 
 ## Development Validation
@@ -686,10 +736,10 @@ Run static analysis:
 go vet ./...
 ```
 
-Run all tests:
+Run all tests without cached results:
 
 ```bash
-go test ./...
+go test -count=1 ./...
 ```
 
 Run domain tests with coverage:
@@ -711,24 +761,26 @@ go test -v ./internal/httpapi
 go test -cover ./internal/httpapi
 ```
 
-Run application-service tests:
+Run application-service tests and measure service coverage:
 
 ```bash
 go test -v ./internal/trading
+go test -cover ./internal/trading
 ```
 
-When a compatible C compiler is available, run the Go race detector:
+When CGO is enabled and a compatible C compiler is available, run the Go race detector:
 
 ```bash
 go test -race ./...
 ```
 
-Passing the concurrent submission unit test does not establish that the program is race-free. Race detector validation has not yet been completed for this block; it is also planned for CI.
+Passing concurrent unit tests does not establish that the program is race-free. Race detector validation has not yet been completed for this block; it is also planned for CI on Linux.
 
 Check whitespace and formatting problems before committing:
 
 ```bash
 git diff --check
+git diff --cached --check
 ```
 
 ## Testing Philosophy
@@ -775,13 +827,17 @@ Current tests cover behavior including:
 - HTTP input validation and expected status codes
 - duplicate order rejection through HTTP
 - matching across successive HTTP requests
+- order lookup returning the current state after matching
+- order lookup returning 404 for unknown identifiers
+- order lookup rejecting unsupported HTTP methods with 405
+- snapshot isolation across repeated order lookups
 - concurrent application-service order submission
 
 Coverage is used as feedback rather than as the sole measure of test quality.
 
 ## Roadmap
 
-The next major milestones are HTTP order lookup and cancellation, followed by transactional consistency and controlled concurrent matching.
+The next major milestones are HTTP order cancellation, followed by transactional consistency and controlled concurrent matching.
 
 Subsequent phases will introduce PostgreSQL persistence, idempotency, Redis, observability, CI/CD, and deployment infrastructure.
 

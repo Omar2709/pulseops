@@ -23,5 +23,10 @@ func NewRouter(
 		handler.SubmitOrder,
 	)
 
+	mux.HandleFunc(
+		"GET /v1/orders/{id}",
+		handler.GetOrder,
+	)
+
 	return mux
 }

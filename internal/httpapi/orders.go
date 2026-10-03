@@ -44,6 +44,25 @@ type orderResponse struct {
 	UpdatedAt      string `json:"updated_at"`
 }
 
+// Convert an application snapshot into the HTTP response DTO.
+// Both POST and GET use this representation.
+func orderResponseFromSnapshot(
+	order trading.OrderSnapshot,
+) orderResponse {
+	return orderResponse{
+		ID:             order.ID,
+		Symbol:         order.Symbol,
+		Side:           string(order.Side),
+		PriceUnits:     order.Price.Units(),
+		QuantityUnits:  order.Quantity.Units(),
+		FilledUnits:    order.FilledQuantity.Units(),
+		RemainingUnits: order.RemainingQuantity.Units(),
+		Status:         string(order.Status),
+		CreatedAt:      order.CreatedAt.Format(time.RFC3339Nano),
+		UpdatedAt:      order.UpdatedAt.Format(time.RFC3339Nano),
+	}
+}
+
 func (h *Handler) SubmitOrder(
 	w http.ResponseWriter,
 	r *http.Request,
@@ -170,21 +189,8 @@ func (h *Handler) SubmitOrder(
 		return
 	}
 
-	// Build the HTTP response using a domain snapshot.
-	order := result.Order
-
-	response := orderResponse{
-		ID:             order.ID,
-		Symbol:         order.Symbol,
-		Side:           string(order.Side),
-		PriceUnits:     order.Price.Units(),
-		QuantityUnits:  order.Quantity.Units(),
-		FilledUnits:    order.FilledQuantity.Units(),
-		RemainingUnits: order.RemainingQuantity.Units(),
-		Status:         string(order.Status),
-		CreatedAt:      order.CreatedAt.Format(time.RFC3339Nano),
-		UpdatedAt:      order.UpdatedAt.Format(time.RFC3339Nano),
-	}
+	// Use the shared HTTP representation.
+	response := orderResponseFromSnapshot(result.Order)
 
 	if err := writeJSON(
 		w,
