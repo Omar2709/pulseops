@@ -4,13 +4,13 @@ PulseOps is a trading and order-matching backend built with Go.
 
 The project is being developed progressively to explore production-oriented backend engineering concepts including domain modeling, order matching, concurrency, transactional consistency, idempotency, PostgreSQL, Redis, observability, Docker, Kubernetes, and CI/CD.
 
-The current implementation provides an in-memory trading application service, a sequential matching engine, and an HTTP API for submitting limit orders and retrieving their current state. Order submission and matching are serialized using an exclusive lock, while order lookup uses a read lock; controlled concurrent matching will be introduced in a later phase.
+The current implementation provides an in-memory trading application service, a sequential matching engine, and an HTTP API for submitting, retrieving, and cancelling limit orders. Order submission, matching, and cancellation are serialized using an exclusive lock, while order lookup uses a read lock; controlled concurrent matching will be introduced in a later phase.
 
 > PulseOps is an educational trading-system simulation. It is not intended for real-money trading.
 
 ## Current Status
 
-PulseOps currently implements the core trading domain, an in-memory order-matching engine, HTTP order submission, and order lookup by ID.
+PulseOps currently implements the core trading domain, an in-memory order-matching engine, HTTP order submission, order lookup by ID, and HTTP order cancellation.
 
 Implemented:
 
@@ -58,11 +58,16 @@ Implemented:
 - Fixed-point decimal parsing without floating-point arithmetic
 - `POST /v1/orders` endpoint
 - `GET /v1/orders/{id}` endpoint
+- `DELETE /v1/orders/{id}` cancellation endpoint
+- Application-service cancellation of open and partially filled orders
+- Exclusive synchronization of cancellation with matching
+- Retention of cancelled orders and their executed quantities in the order registry
 - HTTP request validation and body size limits
 - HTTP integration tests for order submission and matching
 - HTTP integration tests for order lookup
+- HTTP integration tests for cancellation, partial fills, error responses, and method restrictions
 
-HTTP order cancellation, persistence, controlled concurrent matching, Redis integration, observability, and deployment infrastructure will be introduced progressively.
+Persistence, controlled concurrent matching, Redis integration, observability, and deployment infrastructure will be introduced progressively.
 
 ## Domain
 
@@ -469,6 +474,8 @@ pulseops/
 │   │   ├── health.go
 │   │   ├── health_test.go
 │   │   ├── orders.go
+│   │   ├── orders_delete.go
+│   │   ├── orders_delete_test.go
 │   │   ├── orders_get.go
 │   │   ├── orders_get_test.go
 │   │   ├── orders_test.go
@@ -508,7 +515,7 @@ pulseops/
 └── README.md
 ```
 
-The `internal/httpapi` package contains HTTP routing, decimal parsing, handlers, and response helpers. The `internal/orders` package contains the trading domain and the in-memory matching engine. The `internal/trading` package coordinates order submission, matching, and order lookup through an in-memory application service.
+The `internal/httpapi` package contains HTTP routing, decimal parsing, handlers, and response helpers. The `internal/orders` package contains the trading domain and the in-memory matching engine. The `internal/trading` package coordinates order submission, matching, synchronized order lookup, and cancellation through an in-memory application service.
 
 Responsibilities are separated as follows:
 
@@ -518,7 +525,9 @@ httpapi/router.go
 httpapi/health.go
 → GET /healthz liveness handler
 httpapi/orders.go
-→ POST /v1/orders validation, submission, and shared order response mapping
+→ POST /v1/orders validation, submission, and shared order response mapping for POST, GET, and DELETE
+httpapi/orders_delete.go
+→ DELETE /v1/orders/{id}, cancellation and HTTP error mapping
 httpapi/orders_get.go
 → GET /v1/orders/{id}, lookup and HTTP response mapping
 httpapi/decimal.go
@@ -526,7 +535,7 @@ httpapi/decimal.go
 httpapi/response.go
 → JSON response and standardized error helpers
 trading/service.go
-→ order registry, independent symbol books, order submission, matching coordination, synchronized order lookup, and snapshots
+→ order registry, independent symbol books, order submission, matching coordination, synchronized order lookup and cancellation, and snapshots
 order.go
 → Order entity and construction
 order_lifecycle.go
@@ -541,7 +550,7 @@ matching_engine.go
 
 Tests are colocated with their corresponding HTTP, application-service, and domain components.
 
-The architecture will continue to evolve with HTTP cancellation, persistence, controlled concurrent matching, Redis, observability, and infrastructure.
+The architecture will continue to evolve with persistence, controlled concurrent matching, Redis, observability, and infrastructure.
 
 ## HTTP API
 
@@ -627,6 +636,49 @@ Order lookup returns snapshots instead of exposing mutable domain entities. Data
 
 Authentication and authorization are not yet implemented. This API must not be exposed publicly in its current form.
 
+### Cancel Order
+
+`DELETE /v1/orders/{id}`
+
+Cancels an existing order by its unique identifier. Only orders in `OPEN` or `PARTIALLY_FILLED` state can be cancelled. Cancellation removes the order from the active order book but retains its latest state in the application registry, where it remains available through `GET /v1/orders/{id}`.
+
+Example request:
+
+```http
+DELETE /v1/orders/buy-001
+```
+
+A successful request returns `200 OK` and the same JSON representation used by order submission and lookup, with `status` set to `CANCELLED`. For a partially filled order, `filled_units` preserves the quantity already executed and `remaining_units` records the unfilled quantity at cancellation. The remaining quantity is historical information and is no longer available for matching.
+
+Example response for a partially filled order (timestamps and values are illustrative):
+
+```json
+{
+  "id": "buy-001",
+  "symbol": "BTCUSD",
+  "side": "BUY",
+  "price_units": "6000000",
+  "quantity_units": "5000000",
+  "filled_units": "2000000",
+  "remaining_units": "3000000",
+  "status": "CANCELLED",
+  "created_at": "2026-10-03T14:00:00Z",
+  "updated_at": "2026-10-03T14:00:02Z"
+}
+```
+
+Responses:
+
+- `200 OK`: the order was cancelled; returns the updated order snapshot.
+- `404 Not Found`: no order exists with the supplied ID.
+- `409 Conflict`: the order is already cancelled, fully filled, or otherwise not cancellable.
+- `405 Method Not Allowed`: the HTTP method is not supported. The `Allow` header includes `GET`, `HEAD`, and `DELETE` for this order-resource route.
+- `500 Internal Server Error`: an unexpected internal failure occurred.
+
+The application service holds an exclusive `sync.RWMutex` lock during cancellation, preventing concurrent order submission or matching through that service. The domain's `OrderBook.Cancel` performs the state transition before removing the order from the active book. This is not durable transaction handling across process failures.
+
+State is held in memory and is lost when the application restarts. Authentication and authorization are not implemented, so this API must not be exposed publicly in its current form.
+
 ## Current Limitations
 
 The current matching engine intentionally prioritizes correctness and domain modeling over production-scale optimization.
@@ -635,13 +687,12 @@ Current limitations include:
 
 - Application state is stored only in memory.
 - Matching is sequential.
-- Order submission and matching currently use an exclusive lock; order lookup uses a shared read lock.
+- Order submission, matching, and cancellation currently use an exclusive lock; order lookup uses a shared read lock.
 - The order book is not safe for unsynchronized concurrent access outside the application service.
 - Matching failures do not currently provide transactional rollback across an entire submission; an order may already be registered when a later matching step fails.
 - Order-book data structures are not optimized for very large books.
 - Trade IDs are generated using an in-memory sequence and are not durable across process restarts.
 - No PostgreSQL persistence or Redis integration exists yet.
-- HTTP order cancellation has not yet been implemented.
 - Authentication and authorization have not yet been implemented.
 - The HTTP API is intended for educational simulation, not production trading.
 - The Go race detector has not yet been executed
@@ -656,7 +707,6 @@ These limitations will be addressed progressively rather than adding infrastruct
 PulseOps is planned to include:
 
 - Additional REST endpoints using `net/http` (with optional routing libraries if needed)
-- HTTP order cancellation endpoint
 - Best bid / best ask market quotes
 - PostgreSQL persistence
 - Database migrations
@@ -692,7 +742,7 @@ go version
 go run ./cmd/api
 ```
 
-This starts the HTTP server. The `GET /healthz` liveness endpoint, `POST /v1/orders` submission endpoint, and `GET /v1/orders/{id}` lookup endpoint are available on port `8080` by default.
+This starts the HTTP server. The `GET /healthz` liveness endpoint, `POST /v1/orders` submission endpoint, `GET /v1/orders/{id}` lookup endpoint, and `DELETE /v1/orders/{id}` cancellation endpoint are available on port `8080` by default.
 
 To submit an example order from PowerShell:
 
@@ -718,6 +768,14 @@ To retrieve the order's latest state:
 Invoke-RestMethod `
     -Uri "http://localhost:8080/v1/orders/buy-001" `
     -Method GET
+```
+
+To cancel an open or partially filled order:
+
+```powershell
+Invoke-RestMethod `
+    -Uri "http://localhost:8080/v1/orders/buy-001" `
+    -Method DELETE
 ```
 
 The in-memory order registry resets when the process restarts. Reusing an order ID during one process lifetime returns `409 Conflict`.
@@ -830,6 +888,11 @@ Current tests cover behavior including:
 - order lookup returning the current state after matching
 - order lookup returning 404 for unknown identifiers
 - order lookup rejecting unsupported HTTP methods with 405
+- HTTP cancellation of open orders, followed by lookup of the cancelled state
+- HTTP rejection of nonexistent and fully filled order cancellations
+- HTTP cancellation of partially filled orders without undoing prior fills
+- prevention of further matching after HTTP cancellation
+- HTTP cancellation route rejecting unsupported methods with 405
 - snapshot isolation across repeated order lookups
 - concurrent application-service order submission
 
@@ -837,7 +900,7 @@ Coverage is used as feedback rather than as the sole measure of test quality.
 
 ## Roadmap
 
-The next major milestones are HTTP order cancellation, followed by transactional consistency and controlled concurrent matching.
+The next major milestones are transactional consistency and controlled concurrent matching, following HTTP order submission, lookup, and cancellation.
 
 Subsequent phases will introduce PostgreSQL persistence, idempotency, Redis, observability, CI/CD, and deployment infrastructure.
 

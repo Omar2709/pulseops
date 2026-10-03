@@ -474,3 +474,313 @@ func TestGetOrderReturnsNotFound(t *testing.T) {
 		)
 	}
 }
+
+// TestCancelOrderRemovesOpenOrderFromBook verifies that cancellation
+// removes an order from the active book without removing it from the registry.
+func TestCancelOrderRemovesOpenOrderFromBook(
+	t *testing.T,
+) {
+	now := testTime()
+
+	service := newService(func() time.Time {
+		return now
+	})
+
+	created, err := service.SubmitOrder(
+		SubmitOrderInput{
+			ID:       "buy-001",
+			Symbol:   "BTCUSD",
+			Side:     orders.SideBuy,
+			Price:    orders.Price(6_000_000),
+			Quantity: orders.Quantity(5_000_000),
+		},
+	)
+	if err != nil {
+		t.Fatalf("submitting order: %v", err)
+	}
+
+	now = now.Add(time.Second)
+
+	cancelled, err := service.CancelOrder(" buy-001 ")
+	if err != nil {
+		t.Fatalf("cancelling order: %v", err)
+	}
+
+	if cancelled.Status != orders.OrderStatusCancelled {
+		t.Errorf(
+			"expected CANCELLED, got %s",
+			cancelled.Status,
+		)
+	}
+
+	if cancelled.RemainingQuantity != 5_000_000 {
+		t.Errorf(
+			"unexpected remaining quantity: %d",
+			cancelled.RemainingQuantity,
+		)
+	}
+
+	if !cancelled.UpdatedAt.Equal(now) {
+		t.Errorf(
+			"unexpected update time: %v",
+			cancelled.UpdatedAt,
+		)
+	}
+
+	book := service.books["BTCUSD"]
+	if book == nil {
+		t.Fatal("expected BTCUSD order book to exist")
+	}
+
+	if len(book.Bids()) != 0 {
+		t.Error("cancelled order remains in order book")
+	}
+
+	stored, err := service.GetOrder("buy-001")
+	if err != nil {
+		t.Fatalf("retrieving cancelled order: %v", err)
+	}
+
+	if stored.Status != orders.OrderStatusCancelled {
+		t.Errorf(
+			"expected stored order to be CANCELLED, got %s",
+			stored.Status,
+		)
+	}
+
+	if created.Order.Status != orders.OrderStatusOpen {
+		t.Error("original submission snapshot was modified")
+	}
+
+	_, err = service.CancelOrder("buy-001")
+
+	if !errors.Is(err, ErrOrderNotCancellable) {
+		t.Fatalf(
+			"expected ErrOrderNotCancellable, got %v",
+			err,
+		)
+	}
+}
+
+// TestCancelOrderPreservesPartialFillAndPreventsFurtherMatching verifies
+// that cancelling a partially filled order preserves its execution history
+// and removes its remaining quantity from active matching.
+func TestCancelOrderPreservesPartialFillAndPreventsFurtherMatching(
+	t *testing.T,
+) {
+	now := testTime()
+
+	service := newService(func() time.Time {
+		return now
+	})
+
+	// Register a SELL order for 0.05 BTC.
+	_, err := service.SubmitOrder(
+		SubmitOrderInput{
+			ID:       "sell-001",
+			Symbol:   "BTCUSD",
+			Side:     orders.SideSell,
+			Price:    orders.Price(6_000_000),
+			Quantity: orders.Quantity(5_000_000),
+		},
+	)
+	if err != nil {
+		t.Fatalf("submitting sell order: %v", err)
+	}
+
+	// Execute 0.02 BTC, leaving 0.03 BTC pending.
+	now = now.Add(time.Second)
+
+	result, err := service.SubmitOrder(
+		SubmitOrderInput{
+			ID:       "buy-001",
+			Symbol:   "BTCUSD",
+			Side:     orders.SideBuy,
+			Price:    orders.Price(6_100_000),
+			Quantity: orders.Quantity(2_000_000),
+		},
+	)
+	if err != nil {
+		t.Fatalf("submitting first buy: %v", err)
+	}
+
+	if len(result.Trades) != 1 {
+		t.Fatalf(
+			"expected 1 trade, got %d",
+			len(result.Trades),
+		)
+	}
+
+	before, err := service.GetOrder("sell-001")
+	if err != nil {
+		t.Fatalf("getting sell order: %v", err)
+	}
+
+	if before.Status != orders.OrderStatusPartiallyFilled {
+		t.Fatalf(
+			"expected PARTIALLY_FILLED, got %s",
+			before.Status,
+		)
+	}
+
+	// Cancel the remaining quantity.
+	now = now.Add(time.Second)
+
+	cancelled, err := service.CancelOrder("sell-001")
+	if err != nil {
+		t.Fatalf("cancelling partial order: %v", err)
+	}
+
+	if cancelled.Status != orders.OrderStatusCancelled {
+		t.Errorf(
+			"expected CANCELLED, got %s",
+			cancelled.Status,
+		)
+	}
+
+	if cancelled.FilledQuantity != orders.Quantity(2_000_000) {
+		t.Errorf(
+			"expected filled quantity 2000000, got %d",
+			cancelled.FilledQuantity,
+		)
+	}
+
+	if cancelled.RemainingQuantity != orders.Quantity(3_000_000) {
+		t.Errorf(
+			"expected remaining quantity 3000000, got %d",
+			cancelled.RemainingQuantity,
+		)
+	}
+
+	book := service.books["BTCUSD"]
+	if book == nil {
+		t.Fatal("expected BTCUSD order book to exist")
+	}
+
+	if len(book.Asks()) != 0 {
+		t.Fatal("cancelled SELL remains in the order book")
+	}
+
+	// A new BUY must not execute against the cancelled SELL.
+	now = now.Add(time.Second)
+
+	next, err := service.SubmitOrder(
+		SubmitOrderInput{
+			ID:       "buy-002",
+			Symbol:   "BTCUSD",
+			Side:     orders.SideBuy,
+			Price:    orders.Price(6_100_000),
+			Quantity: orders.Quantity(3_000_000),
+		},
+	)
+	if err != nil {
+		t.Fatalf("submitting second buy: %v", err)
+	}
+
+	if len(next.Trades) != 0 {
+		t.Errorf(
+			"expected 0 trades after cancellation, got %d",
+			len(next.Trades),
+		)
+	}
+
+	if next.Order.Status != orders.OrderStatusOpen {
+		t.Errorf(
+			"expected new BUY to remain OPEN, got %s",
+			next.Order.Status,
+		)
+	}
+
+	stored, err := service.GetOrder("sell-001")
+	if err != nil {
+		t.Fatalf("getting cancelled order: %v", err)
+	}
+
+	if stored.Status != orders.OrderStatusCancelled {
+		t.Error("cancelled order changed status unexpectedly")
+	}
+
+	if stored.FilledQuantity != orders.Quantity(2_000_000) {
+		t.Error("historical executed quantity changed unexpectedly")
+	}
+}
+
+// TestCancelOrderRejectsFilledOrder verifies that a terminal FILLED
+// order cannot transition to CANCELLED.
+func TestCancelOrderRejectsFilledOrder(t *testing.T) {
+	now := testTime()
+
+	service := newService(func() time.Time {
+		return now
+	})
+
+	_, err := service.SubmitOrder(
+		SubmitOrderInput{
+			ID:       "sell-001",
+			Symbol:   "BTCUSD",
+			Side:     orders.SideSell,
+			Price:    orders.Price(6_000_000),
+			Quantity: orders.Quantity(5_000_000),
+		},
+	)
+	if err != nil {
+		t.Fatalf("submitting sell order: %v", err)
+	}
+
+	now = now.Add(time.Second)
+
+	_, err = service.SubmitOrder(
+		SubmitOrderInput{
+			ID:       "buy-001",
+			Symbol:   "BTCUSD",
+			Side:     orders.SideBuy,
+			Price:    orders.Price(6_100_000),
+			Quantity: orders.Quantity(5_000_000),
+		},
+	)
+	if err != nil {
+		t.Fatalf("submitting buy order: %v", err)
+	}
+
+	now = now.Add(time.Second)
+
+	_, err = service.CancelOrder("sell-001")
+
+	if !errors.Is(err, ErrOrderNotCancellable) {
+		t.Fatalf(
+			"expected ErrOrderNotCancellable, got %v",
+			err,
+		)
+	}
+
+	stored, err := service.GetOrder("sell-001")
+	if err != nil {
+		t.Fatalf("retrieving filled order: %v", err)
+	}
+
+	if stored.Status != orders.OrderStatusFilled {
+		t.Errorf(
+			"expected FILLED, got %s",
+			stored.Status,
+		)
+	}
+
+	if stored.RemainingQuantity != 0 {
+		t.Error("filled order has unexpected remaining quantity")
+	}
+}
+
+// TestCancelOrderReturnsNotFound verifies that an unknown ID
+// returns the application's not-found error.
+func TestCancelOrderReturnsNotFound(t *testing.T) {
+	service := NewService()
+
+	_, err := service.CancelOrder("unknown-order")
+
+	if !errors.Is(err, ErrOrderNotFound) {
+		t.Fatalf(
+			"expected ErrOrderNotFound, got %v",
+			err,
+		)
+	}
+}

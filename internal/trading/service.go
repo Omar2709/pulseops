@@ -2,6 +2,7 @@ package trading
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"time"
@@ -10,8 +11,9 @@ import (
 )
 
 var (
-	ErrDuplicateOrder = errors.New("order already exists")
-	ErrOrderNotFound  = errors.New("order not found")
+	ErrDuplicateOrder      = errors.New("order already exists")
+	ErrOrderNotFound       = errors.New("order not found")
+	ErrOrderNotCancellable = errors.New("order cannot be cancelled")
 )
 
 type SubmitOrderInput struct {
@@ -151,6 +153,45 @@ func (s *Service) GetOrder(
 	order, exists := s.orders[id]
 	if !exists {
 		return OrderSnapshot{}, ErrOrderNotFound
+	}
+
+	return snapshotOrder(order), nil
+}
+
+// CancelOrder removes an active order from its book but keeps it in the
+// registry so it remains available through GetOrder.
+func (s *Service) CancelOrder(
+	id string,
+) (OrderSnapshot, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	id = strings.TrimSpace(id)
+
+	order, exists := s.orders[id]
+	if !exists {
+		return OrderSnapshot{}, ErrOrderNotFound
+	}
+
+	if order.Status() != orders.OrderStatusOpen &&
+		order.Status() != orders.OrderStatusPartiallyFilled {
+		return OrderSnapshot{}, ErrOrderNotCancellable
+	}
+
+	book, exists := s.books[order.Symbol()]
+	if !exists {
+		return OrderSnapshot{}, fmt.Errorf(
+			"missing order book for symbol %s",
+			order.Symbol(),
+		)
+	}
+
+	if err := book.Cancel(order.ID(), s.now()); err != nil {
+		return OrderSnapshot{}, fmt.Errorf(
+			"cancel order %s: %w",
+			order.ID(),
+			err,
+		)
 	}
 
 	return snapshotOrder(order), nil

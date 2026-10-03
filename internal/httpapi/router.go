@@ -28,5 +28,10 @@ func NewRouter(
 		handler.GetOrder,
 	)
 
+	mux.HandleFunc(
+		"DELETE /v1/orders/{id}",
+		handler.CancelOrder,
+	)
+
 	return mux
 }
