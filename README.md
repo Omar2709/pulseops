@@ -4,13 +4,13 @@ PulseOps is a trading and order-matching backend built with Go.
 
 The project is being developed progressively to explore production-oriented backend engineering concepts including domain modeling, order matching, concurrency, transactional consistency, idempotency, PostgreSQL, Redis, observability, Docker, Kubernetes, and CI/CD.
 
-The current implementation provides an in-memory trading application service, a sequential matching engine, and an HTTP API for submitting, retrieving, and cancelling limit orders. Order submission, matching, and cancellation are serialized using an exclusive lock, while order lookup uses a read lock; controlled concurrent matching will be introduced in a later phase.
+The current implementation provides an in-memory trading application service, a sequential matching engine, and an HTTP API for submitting, retrieving, and cancelling limit orders. Order submission now provides in-memory atomicity for matching errors by operating on independent working copies and publishing results only after successful matching. Submission, matching, and cancellation are serialized using an exclusive lock, while order lookup uses a read lock; controlled concurrent matching will be introduced in a later phase.
 
 > PulseOps is an educational trading-system simulation. It is not intended for real-money trading.
 
 ## Current Status
 
-PulseOps currently implements the core trading domain, an in-memory order-matching engine, HTTP order submission, order lookup by ID, and HTTP order cancellation.
+PulseOps currently implements the core trading domain, an in-memory order-matching engine, HTTP order submission with in-memory atomicity for matching errors, order lookup by ID, and HTTP order cancellation.
 
 Implemented:
 
@@ -55,6 +55,11 @@ Implemented:
 - In-memory order registry
 - Independent order books per symbol
 - Reader-writer synchronization using `sync.RWMutex`
+- In-memory atomic order submission using independent working copies
+- `OrderBook.Clone()` preserving active order state and original FIFO insertion sequences
+- `MatchingEngine.Clone()` preserving the confirmed trade-ID sequence
+- Deferred publication of updated orders, the order book, and the matching engine after successful matching
+- Failed matching leaves the order registry, active book, and confirmed trade-ID sequence unchanged
 - Fixed-point decimal parsing without floating-point arithmetic
 - `POST /v1/orders` endpoint
 - `GET /v1/orders/{id}` endpoint
@@ -66,6 +71,9 @@ Implemented:
 - HTTP integration tests for order submission and matching
 - HTTP integration tests for order lookup
 - HTTP integration tests for cancellation, partial fills, error responses, and method restrictions
+- Regression tests for failed matching before and after an initial trade
+- Regression tests for trade-ID continuity after a failed submission
+- Tests for order-book clone isolation and preservation of cross-side insertion sequences
 
 Persistence, controlled concurrent matching, Redis integration, observability, and deployment infrastructure will be introduced progressively.
 
@@ -323,6 +331,12 @@ third
 
 This provides the initial price-time priority model used by the matching engine.
 
+### Transactional Cloning
+
+`OrderBook.Clone()` creates independent copies of the active orders, preserving their insertion sequence numbers and the book's `nextSequence`. It also returns a map of all cloned active orders. This map retains references to working orders that become fully filled and leave the working book during matching, allowing their updated states to be committed to the service registry.
+
+The clone currently relies on `Order` containing value fields. If mutable maps, slices, or pointers are added to the entity, the cloning strategy must be reviewed to maintain isolation.
+
 ### Cancellation
 
 Order cancellation is coordinated through the order book.
@@ -457,7 +471,9 @@ apply SELL fill
 
 If one side is invalid, the engine returns an error without partially filling the valid counter-order.
 
-This provides in-memory mutation safety for the current sequential implementation.
+This validates both sides before applying each individual trade. `MatchingEngine.Match()` itself updates the book and orders in place and does not independently roll back an entire batch after a later failure. For application-level order submission, `trading.Service` performs matching on cloned working state and publishes the result only if the complete matching operation succeeds.
+
+`MatchingEngine.Clone()` also copies the current trade-ID sequence. Trade IDs generated in an unsuccessful working match are discarded without advancing the confirmed engine.
 
 ## Current Architecture
 
@@ -490,6 +506,7 @@ pulseops/
 │   │   ├── order.go
 │   │   ├── order_test.go
 │   │   ├── order_book.go
+│   │   ├── order_book_clone_test.go
 │   │   ├── order_book_test.go
 │   │   ├── order_lifecycle.go
 │   │   ├── order_lifecycle_test.go
@@ -515,7 +532,7 @@ pulseops/
 └── README.md
 ```
 
-The `internal/httpapi` package contains HTTP routing, decimal parsing, handlers, and response helpers. The `internal/orders` package contains the trading domain and the in-memory matching engine. The `internal/trading` package coordinates order submission, matching, synchronized order lookup, and cancellation through an in-memory application service.
+The `internal/httpapi` package contains HTTP routing, decimal parsing, handlers, and response helpers. The `internal/orders` package contains the trading domain, the in-memory matching engine, and independent cloning support for both the active order book and the engine. The `internal/trading` package coordinates atomic in-memory order submission, matching, synchronized order lookup, and cancellation through an in-memory application service.
 
 Responsibilities are separated as follows:
 
@@ -535,7 +552,7 @@ httpapi/decimal.go
 httpapi/response.go
 → JSON response and standardized error helpers
 trading/service.go
-→ order registry, independent symbol books, order submission, matching coordination, synchronized order lookup and cancellation, and snapshots
+→ order registry, independent symbol books, transactional working copies for submission, deferred state publication, synchronized order lookup and cancellation, and snapshots
 order.go
 → Order entity and construction
 order_lifecycle.go
@@ -543,12 +560,18 @@ order_lifecycle.go
 trade.go
 → immutable trade execution records
 order_book.go
-→ in-memory bids, asks, ordering, and cancellation
+→ in-memory bids, asks, ordering, cancellation, and Clone() with preserved FIFO and insertion sequences
+order_book_clone_test.go
+→ cloned-book isolation, insertion sequence retention, and cross-side priority tests
 matching_engine.go
-→ matching crossed orders and producing trades
+→ matching crossed orders, producing trades, and Clone() with the current trade-ID sequence
 ```
 
 Tests are colocated with their corresponding HTTP, application-service, and domain components.
+
+For order submission, `trading.Service` locks the shared state, creates a working book with copies of its active orders, and clones the matching engine. It stages the incoming order and runs matching only against these working objects. A matching error discards all working state; success commits updated order references (including fully filled orders removed from the working book), the incoming order, the resulting book, and the advanced engine before releasing the exclusive lock. The book and registry therefore reference the same committed `Order` instances for active orders.
+
+This is in-memory atomicity for errors returned during submission and matching, not durable database transactions or process-crash recovery. `GetOrder` and `CancelOrder` remain synchronized through the same service mutex.
 
 The architecture will continue to evolve with persistence, controlled concurrent matching, Redis, observability, and infrastructure.
 
@@ -689,10 +712,12 @@ Current limitations include:
 - Matching is sequential.
 - Order submission, matching, and cancellation currently use an exclusive lock; order lookup uses a shared read lock.
 - The order book is not safe for unsynchronized concurrent access outside the application service.
-- Matching failures do not currently provide transactional rollback across an entire submission; an order may already be registered when a later matching step fails.
+- Order submission provides in-memory atomicity for errors returned during matching by using independent working copies of the affected order book, its active orders, and the matching engine.
+- Transactional database persistence and recovery from process crashes are not yet implemented.
+- Each submission clones the active orders of its symbol, which introduces additional memory and processing costs for large order books.
 - Order-book data structures are not optimized for very large books.
 - Trade IDs are generated using an in-memory sequence and are not durable across process restarts.
-- No PostgreSQL persistence or Redis integration exists yet.
+- No PostgreSQL persistence or Redis integration exists yet. The service does not provide cross-process coordination or durable transactions.
 - Authentication and authorization have not yet been implemented.
 - The HTTP API is intended for educational simulation, not production trading.
 - The Go race detector has not yet been executed
@@ -710,7 +735,8 @@ PulseOps is planned to include:
 - Best bid / best ask market quotes
 - PostgreSQL persistence
 - Database migrations
-- Transactional order and trade persistence
+- Durable transactional order and trade persistence with process-crash recovery
+- Evaluation of incremental or otherwise more efficient staging for large order books
 - Idempotency keys
 - Redis
 - Controlled matching-engine concurrency using goroutines and channels
@@ -800,6 +826,13 @@ Run all tests without cached results:
 go test -count=1 ./...
 ```
 
+Run the in-memory atomicity regression and clone-isolation tests:
+
+```bash
+go test -run "TestSubmitOrder(MatchingFailureDoesNotChangeState|FailureAfterFirstTradeDoesNotChangeState|FailureDoesNotConsumeTradeSequence)$" -count=1 -v ./internal/trading
+go test -run "^TestOrderBookClone" -count=1 -v ./internal/orders
+```
+
 Run domain tests with coverage:
 
 ```bash
@@ -876,6 +909,11 @@ Current tests cover behavior including:
 - resting BID execution price
 - matching-engine input validation
 - protecting against partial mutation when a counter-order is invalid
+- `TestSubmitOrderMatchingFailureDoesNotChangeState`: failed incoming orders leave no registry or book changes
+- `TestSubmitOrderFailureAfterFirstTradeDoesNotChangeState`: a later matching failure discards earlier provisional fills
+- `TestSubmitOrderFailureDoesNotConsumeTradeSequence`: failed matching does not consume confirmed trade IDs
+- `TestOrderBookClonePreservesPriorityAndIsolation`: cloned books preserve FIFO and do not share mutable orders
+- `TestOrderBookClonePreservesCrossSideSequence`: clone preserves insertion priority across BUY and SELL sides
 - `GET /healthz` handler behavior
 - JSON response helpers
 - standardized JSON error responses
@@ -900,9 +938,9 @@ Coverage is used as feedback rather than as the sole measure of test quality.
 
 ## Roadmap
 
-The next major milestones are transactional consistency and controlled concurrent matching, following HTTP order submission, lookup, and cancellation.
+In-memory atomicity for matching errors is implemented using independent working copies and deferred publication. This does not provide durable transactions or recovery after a process crash.
 
-Subsequent phases will introduce PostgreSQL persistence, idempotency, Redis, observability, CI/CD, and deployment infrastructure.
+Next milestones include transactional PostgreSQL persistence and recovery, followed by controlled concurrent matching and evaluation of more efficient staging for large books. Subsequent phases will introduce idempotency, Redis, observability, CI/CD, and deployment infrastructure.
 
 ## License
 

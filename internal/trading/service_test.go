@@ -784,3 +784,389 @@ func TestCancelOrderReturnsNotFound(t *testing.T) {
 		)
 	}
 }
+
+// TestSubmitOrderMatchingFailureDoesNotChangeState verifies that
+// failed matching does not modify previously committed state.
+func TestSubmitOrderMatchingFailureDoesNotChangeState(
+	t *testing.T,
+) {
+	// Create a resting SELL order.
+	now := testTime().Add(2 * time.Second)
+
+	service := newService(func() time.Time {
+		return now
+	})
+
+	_, err := service.SubmitOrder(
+		SubmitOrderInput{
+			ID:       "sell-001",
+			Symbol:   "BTCUSD",
+			Side:     orders.SideSell,
+			Price:    orders.Price(6_000_000),
+			Quantity: orders.Quantity(5_000_000),
+		},
+	)
+	if err != nil {
+		t.Fatalf("submitting initial sell: %v", err)
+	}
+
+	before, err := service.GetOrder("sell-001")
+	if err != nil {
+		t.Fatalf("getting initial order: %v", err)
+	}
+
+	// Simulate the clock moving backwards.
+	// Matching at this earlier timestamp must fail.
+	now = now.Add(-time.Second)
+
+	_, err = service.SubmitOrder(
+		SubmitOrderInput{
+			ID:       "buy-001",
+			Symbol:   "BTCUSD",
+			Side:     orders.SideBuy,
+			Price:    orders.Price(6_100_000),
+			Quantity: orders.Quantity(5_000_000),
+		},
+	)
+
+	if !errors.Is(
+		err,
+		orders.ErrOrderUpdateTimeBeforeCurrent,
+	) {
+		t.Fatalf(
+			"expected matching timestamp error, got %v",
+			err,
+		)
+	}
+
+	// The existing order must remain unchanged.
+	after, err := service.GetOrder("sell-001")
+	if err != nil {
+		t.Fatalf("getting existing order: %v", err)
+	}
+
+	if after != before {
+		t.Error("existing order changed after failed matching")
+	}
+
+	// The rejected incoming order must not be registered.
+	_, err = service.GetOrder("buy-001")
+
+	if !errors.Is(err, ErrOrderNotFound) {
+		t.Errorf(
+			"expected incoming order to be absent, got %v",
+			err,
+		)
+	}
+
+	// The incoming order must not remain in the book.
+	book := service.books["BTCUSD"]
+	if book == nil {
+		t.Fatal("expected BTCUSD order book")
+	}
+
+	if len(book.Bids()) != 0 {
+		t.Error("failed incoming BUY remains in the order book")
+	}
+
+	if len(book.Asks()) != 1 {
+		t.Error("existing SELL was unexpectedly removed")
+	}
+
+	if len(service.orders) != 1 {
+		t.Errorf(
+			"expected 1 registered order, got %d",
+			len(service.orders),
+		)
+	}
+}
+
+// TestSubmitOrderFailureAfterFirstTradeDoesNotChangeState verifies
+// that a later matching failure discards earlier provisional fills.
+func TestSubmitOrderFailureAfterFirstTradeDoesNotChangeState(
+	t *testing.T,
+) {
+	start := testTime()
+	now := start
+
+	service := newService(func() time.Time {
+		return now
+	})
+
+	// First SELL: created at T0.
+	_, err := service.SubmitOrder(
+		SubmitOrderInput{
+			ID:       "sell-001",
+			Symbol:   "BTCUSD",
+			Side:     orders.SideSell,
+			Price:    orders.Price(6_000_000),
+			Quantity: orders.Quantity(2_000_000),
+		},
+	)
+	if err != nil {
+		t.Fatalf("submitting first sell: %v", err)
+	}
+
+	// Second SELL: created at T0 + 2 seconds.
+	now = start.Add(2 * time.Second)
+
+	_, err = service.SubmitOrder(
+		SubmitOrderInput{
+			ID:       "sell-002",
+			Symbol:   "BTCUSD",
+			Side:     orders.SideSell,
+			Price:    orders.Price(6_100_000),
+			Quantity: orders.Quantity(3_000_000),
+		},
+	)
+	if err != nil {
+		t.Fatalf("submitting second sell: %v", err)
+	}
+
+	firstBefore, err := service.GetOrder("sell-001")
+	if err != nil {
+		t.Fatalf("getting first sell: %v", err)
+	}
+
+	secondBefore, err := service.GetOrder("sell-002")
+	if err != nil {
+		t.Fatalf("getting second sell: %v", err)
+	}
+
+	// Simulate a clock adjustment.
+	//
+	// The incoming BUY can match the first SELL at T0 + 1,
+	// but the second SELL was created later, at T0 + 2.
+	now = start.Add(time.Second)
+
+	_, err = service.SubmitOrder(
+		SubmitOrderInput{
+			ID:       "buy-001",
+			Symbol:   "BTCUSD",
+			Side:     orders.SideBuy,
+			Price:    orders.Price(6_200_000),
+			Quantity: orders.Quantity(5_000_000),
+		},
+	)
+
+	if !errors.Is(
+		err,
+		orders.ErrOrderUpdateTimeBeforeCurrent,
+	) {
+		t.Fatalf(
+			"expected matching timestamp error, got %v",
+			err,
+		)
+	}
+
+	// Neither existing order may change after failure.
+	firstAfter, err := service.GetOrder("sell-001")
+	if err != nil {
+		t.Fatalf("getting first sell after failure: %v", err)
+	}
+
+	secondAfter, err := service.GetOrder("sell-002")
+	if err != nil {
+		t.Fatalf("getting second sell after failure: %v", err)
+	}
+
+	if firstAfter != firstBefore {
+		t.Error("first SELL changed after failed submission")
+	}
+
+	if secondAfter != secondBefore {
+		t.Error("second SELL changed after failed submission")
+	}
+
+	// The failed incoming order must not exist.
+	_, err = service.GetOrder("buy-001")
+
+	if !errors.Is(err, ErrOrderNotFound) {
+		t.Errorf(
+			"expected incoming BUY to be absent, got %v",
+			err,
+		)
+	}
+
+	// Both original SELL orders must remain active.
+	book := service.books["BTCUSD"]
+	if book == nil {
+		t.Fatal("expected BTCUSD order book")
+	}
+
+	if got := len(book.Asks()); got != 2 {
+		t.Errorf(
+			"expected 2 original asks, got %d",
+			got,
+		)
+	}
+
+	if got := len(book.Bids()); got != 0 {
+		t.Errorf(
+			"expected 0 bids after failure, got %d",
+			got,
+		)
+	}
+
+	if got := len(service.orders); got != 2 {
+		t.Errorf(
+			"expected 2 registered orders, got %d",
+			got,
+		)
+	}
+}
+
+// TestSubmitOrderFailureDoesNotConsumeTradeSequence verifies that a failed
+// submission does not commit provisional trades or advance the trade ID sequence.
+func TestSubmitOrderFailureDoesNotConsumeTradeSequence(
+	t *testing.T,
+) {
+	start := testTime()
+	now := start
+
+	service := newService(func() time.Time {
+		return now
+	})
+
+	submit := func(
+		id string,
+		side orders.Side,
+		price orders.Price,
+		quantity orders.Quantity,
+	) (SubmitOrderResult, error) {
+		t.Helper()
+
+		return service.SubmitOrder(
+			SubmitOrderInput{
+				ID:       id,
+				Symbol:   "BTCUSD",
+				Side:     side,
+				Price:    price,
+				Quantity: quantity,
+			},
+		)
+	}
+
+	// Step 1: execute an initial valid trade.
+	_, err := submit(
+		"seed-sell",
+		orders.SideSell,
+		orders.Price(6_000_000),
+		orders.Quantity(1_000_000),
+	)
+	if err != nil {
+		t.Fatalf("submitting initial SELL: %v", err)
+	}
+
+	now = start.Add(time.Second)
+
+	initial, err := submit(
+		"seed-buy",
+		orders.SideBuy,
+		orders.Price(6_000_000),
+		orders.Quantity(1_000_000),
+	)
+	if err != nil {
+		t.Fatalf("submitting initial BUY: %v", err)
+	}
+
+	if len(initial.Trades) != 1 {
+		t.Fatalf(
+			"expected 1 initial trade, got %d",
+			len(initial.Trades),
+		)
+	}
+
+	if got := initial.Trades[0].ID(); got != "trade-000001" {
+		t.Fatalf(
+			"expected initial trade-000001, got %q",
+			got,
+		)
+	}
+
+	// Step 2: register two SELL orders at different times.
+	now = start.Add(3 * time.Second)
+
+	_, err = submit(
+		"sell-001",
+		orders.SideSell,
+		orders.Price(6_000_000),
+		orders.Quantity(2_000_000),
+	)
+	if err != nil {
+		t.Fatalf("submitting first SELL: %v", err)
+	}
+
+	now = start.Add(5 * time.Second)
+
+	_, err = submit(
+		"sell-002",
+		orders.SideSell,
+		orders.Price(6_100_000),
+		orders.Quantity(3_000_000),
+	)
+	if err != nil {
+		t.Fatalf("submitting second SELL: %v", err)
+	}
+
+	// Step 3: move the clock backwards.
+	//
+	// The first match can succeed, but the second must fail.
+	// Neither state changes nor trade IDs should be committed.
+	now = start.Add(4 * time.Second)
+
+	_, err = submit(
+		"failed-buy",
+		orders.SideBuy,
+		orders.Price(6_200_000),
+		orders.Quantity(5_000_000),
+	)
+
+	if !errors.Is(
+		err,
+		orders.ErrOrderUpdateTimeBeforeCurrent,
+	) {
+		t.Fatalf(
+			"expected matching timestamp error, got %v",
+			err,
+		)
+	}
+
+	// Step 4: submit a valid BUY after the failed attempt.
+	//
+	// Both original SELL orders should still be available.
+	now = start.Add(6 * time.Second)
+
+	result, err := submit(
+		"valid-buy",
+		orders.SideBuy,
+		orders.Price(6_200_000),
+		orders.Quantity(5_000_000),
+	)
+	if err != nil {
+		t.Fatalf("submitting valid BUY: %v", err)
+	}
+
+	if len(result.Trades) != 2 {
+		t.Fatalf(
+			"expected 2 trades after rollback, got %d",
+			len(result.Trades),
+		)
+	}
+
+	expectedIDs := []string{
+		"trade-000002",
+		"trade-000003",
+	}
+
+	for index, expected := range expectedIDs {
+		if got := result.Trades[index].ID(); got != expected {
+			t.Errorf(
+				"trade %d: expected ID %q, got %q",
+				index,
+				expected,
+				got,
+			)
+		}
+	}
+}

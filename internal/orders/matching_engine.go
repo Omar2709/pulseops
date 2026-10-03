@@ -129,3 +129,10 @@ func (e *MatchingEngine) Match(
 
 	return trades, nil
 }
+
+// Clone creates an independent matching engine
+// with the same current trade sequence.
+func (e *MatchingEngine) Clone() *MatchingEngine {
+	cloned := *e
+	return &cloned
+}

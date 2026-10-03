@@ -80,19 +80,8 @@ func newService(now func() time.Time) *Service {
 	}
 }
 
-// bookFor must be called while holding s.mu.
-func (s *Service) bookFor(symbol string) *orders.OrderBook {
-	book, exists := s.books[symbol]
-	if exists {
-		return book
-	}
-
-	book = orders.NewOrderBook()
-	s.books[symbol] = book
-
-	return book
-}
-
+// SubmitOrder stages all changes on independent copies and publishes them
+// only after matching completes successfully.
 func (s *Service) SubmitOrder(
 	input SubmitOrderInput,
 ) (SubmitOrderResult, error) {
@@ -101,6 +90,7 @@ func (s *Service) SubmitOrder(
 
 	at := s.now()
 
+	// Validate and construct the incoming order.
 	order, err := orders.NewOrder(
 		input.ID,
 		input.Symbol,
@@ -121,18 +111,45 @@ func (s *Service) SubmitOrder(
 		return SubmitOrderResult{}, err
 	}
 
-	book := s.bookFor(order.Symbol())
+	// Prepare an independent working book.
+	var workingBook *orders.OrderBook
+	var workingOrders map[string]*orders.Order
 
-	if err := book.Add(order); err != nil {
+	originalBook, exists := s.books[order.Symbol()]
+
+	if exists {
+		workingBook, workingOrders = originalBook.Clone()
+	} else {
+		workingBook = orders.NewOrderBook()
+		workingOrders = make(map[string]*orders.Order)
+	}
+
+	// Stage the incoming order without modifying service state.
+	if err := workingBook.Add(order); err != nil {
 		return SubmitOrderResult{}, err
 	}
 
+	// Matching uses an independent trade sequence.
+	workingEngine := s.engine.Clone()
+
+	trades, err := workingEngine.Match(workingBook, at)
+	if err != nil {
+		// No changes have been committed.
+		return SubmitOrderResult{}, err
+	}
+
+	// Commit the updated existing orders, including orders that were
+	// completely filled and removed from workingBook by matching.
+	for id, updatedOrder := range workingOrders {
+		s.orders[id] = updatedOrder
+	}
+
+	// Register the incoming order, including when fully filled.
 	s.orders[order.ID()] = order
 
-	trades, err := s.engine.Match(book, at)
-	if err != nil {
-		return SubmitOrderResult{}, err
-	}
+	// Publish the resulting book and trade sequence.
+	s.books[order.Symbol()] = workingBook
+	s.engine = workingEngine
 
 	return SubmitOrderResult{
 		Order:  snapshotOrder(order),

@@ -205,3 +205,49 @@ func (b *OrderBook) contains(orderID string) bool {
 
 	return false
 }
+
+// Clone creates an independent working copy of the order book.
+//
+// It preserves price/time priority and returns copies of all active
+// orders, including those that may later leave the cloned book.
+func (b *OrderBook) Clone() (
+	*OrderBook,
+	map[string]*Order,
+) {
+	cloned := &OrderBook{
+		symbol:       b.symbol,
+		bids:         make(map[string]orderBookEntry, len(b.bids)),
+		asks:         make(map[string]orderBookEntry, len(b.asks)),
+		nextSequence: b.nextSequence,
+	}
+
+	clonedOrders := make(
+		map[string]*Order,
+		len(b.bids)+len(b.asks),
+	)
+
+	cloneEntry := func(entry orderBookEntry) orderBookEntry {
+		orderCopy := *entry.order
+
+		return orderBookEntry{
+			order:    &orderCopy,
+			sequence: entry.sequence,
+		}
+	}
+
+	for id, entry := range b.bids {
+		copied := cloneEntry(entry)
+
+		cloned.bids[id] = copied
+		clonedOrders[id] = copied.order
+	}
+
+	for id, entry := range b.asks {
+		copied := cloneEntry(entry)
+
+		cloned.asks[id] = copied
+		clonedOrders[id] = copied.order
+	}
+
+	return cloned, clonedOrders
+}
