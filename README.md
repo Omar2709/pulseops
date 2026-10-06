@@ -74,6 +74,7 @@ Implemented:
 - Regression tests for failed matching before and after an initial trade
 - Regression tests for trade-ID continuity after a failed submission
 - Tests for order-book clone isolation and preservation of cross-side insertion sequences
+- GitHub Actions CI for formatting, static analysis, uncached tests, and Linux race detection
 
 Persistence, controlled concurrent matching, Redis integration, observability, and deployment infrastructure will be introduced progressively.
 
@@ -479,6 +480,10 @@ This validates both sides before applying each individual trade. `MatchingEngine
 
 ```text
 pulseops/
+├── .github/
+│   └── workflows/
+│       └── ci.yml
+│
 ├── cmd/
 │   └── api/
 │       └── main.go
@@ -537,6 +542,8 @@ The `internal/httpapi` package contains HTTP routing, decimal parsing, handlers,
 Responsibilities are separated as follows:
 
 ```text
+github/workflows/ci.yml
+→ Linux CI for formatting, go vet, uncached tests, and the Go race detector
 httpapi/router.go
 → standard-library HTTP routing with ServeMux
 httpapi/health.go
@@ -720,10 +727,7 @@ Current limitations include:
 - No PostgreSQL persistence or Redis integration exists yet. The service does not provide cross-process coordination or durable transactions.
 - Authentication and authorization have not yet been implemented.
 - The HTTP API is intended for educational simulation, not production trading.
-- The Go race detector has not yet been executed
-  successfully in the current Windows environment
-  because CGO was disabled. Race detector validation
-  is planned for Linux CI.
+- Linux CI is configured to run the Go race detector with CGO enabled. Local Windows race-detector execution still requires CGO and a compatible C compiler.
 
 These limitations will be addressed progressively rather than adding infrastructure before the corresponding problem exists.
 
@@ -740,13 +744,11 @@ PulseOps is planned to include:
 - Idempotency keys
 - Redis
 - Controlled matching-engine concurrency using goroutines and channels
-- Race detector validation in CI
 - Unit and integration tests
 - Health and readiness endpoints
 - Docker and Docker Compose
 - Prometheus-compatible metrics
 - Observability and tracing
-- GitHub Actions
 - Kubernetes manifests
 - Architecture documentation
 
@@ -865,7 +867,20 @@ When CGO is enabled and a compatible C compiler is available, run the Go race de
 go test -race ./...
 ```
 
-Passing concurrent unit tests does not establish that the program is race-free. Race detector validation has not yet been completed for this block; it is also planned for CI on Linux.
+Passing concurrent unit tests does not establish that the program is race-free. The Linux CI workflow runs the race detector independently from the normal test job.
+
+### Continuous Integration
+
+GitHub Actions validates pushes to `main`, pull requests, and manual workflow runs.
+
+The CI pipeline verifies:
+
+- Go formatting without silently committing formatter changes
+- `go vet ./...`
+- uncached unit and integration tests with `go test -count=1 ./...`
+- `go test -race -count=1 ./...` on Linux with CGO enabled
+
+The workflow uses read-only repository permissions and pins third-party action references to immutable commit SHAs.
 
 Check whitespace and formatting problems before committing:
 
@@ -940,7 +955,7 @@ Coverage is used as feedback rather than as the sole measure of test quality.
 
 In-memory atomicity for matching errors is implemented using independent working copies and deferred publication. This does not provide durable transactions or recovery after a process crash.
 
-Next milestones include transactional PostgreSQL persistence and recovery, followed by controlled concurrent matching and evaluation of more efficient staging for large books. Subsequent phases will introduce idempotency, Redis, observability, CI/CD, and deployment infrastructure.
+Next milestones include transactional PostgreSQL persistence and recovery, followed by controlled concurrent matching and evaluation of more efficient staging for large books. Subsequent phases will introduce idempotency, Redis, observability, deployment automation, and Kubernetes infrastructure.
 
 ## License
 
