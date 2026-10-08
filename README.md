@@ -4,7 +4,7 @@ PulseOps is a trading and order-matching backend built with Go.
 
 The project is being developed progressively to explore production-oriented backend engineering concepts including domain modeling, order matching, concurrency, transactional consistency, idempotency, PostgreSQL, Redis, observability, Docker, Kubernetes, and CI/CD.
 
-The current implementation provides an in-memory trading application service, a sequential matching engine, and an HTTP API for submitting, retrieving, and cancelling limit orders. Order submission now provides in-memory atomicity for matching errors by operating on independent working copies and publishing results only after successful matching. Submission, matching, and cancellation are serialized using an exclusive lock, while order lookup uses a read lock; controlled concurrent matching will be introduced in a later phase.
+The current implementation provides an in-memory trading application service, a sequential matching engine, and an HTTP API for submitting, retrieving, and cancelling limit orders. Order submission and cancellation provide persistence-before-publication semantics through a pluggable StateStore. When DATABASE_URL is configured, PostgreSQL stores order snapshots and trades transactionally; without it, the service keeps the existing in-memory-only behavior. Submission, matching, and cancellation are serialized using an exclusive lock, while order lookup uses a read lock; controlled concurrent matching will be introduced in a later phase.
 
 > PulseOps is an educational trading-system simulation. It is not intended for real-money trading.
 
@@ -60,9 +60,14 @@ Implemented:
 - `MatchingEngine.Clone()` preserving the confirmed trade-ID sequence
 - Deferred publication of updated orders, the order book, and the matching engine after successful matching
 - Failed matching leaves the order registry, active book, and confirmed trade-ID sequence unchanged
-- Pluggable `StateStore` persistence boundary for order submission
-- Request context propagation from HTTP submission into the persistence boundary
+- Pluggable `StateStore` persistence boundary for order submission and cancellation
+- Request context propagation from HTTP operations into the persistence boundary
 - Persistence failures leave in-memory orders, books, and trade-ID sequence unpublished
+- PostgreSQL-backed StateStore using pgx v5
+- Transactional order upserts and trade inserts
+- Embedded, tracked PostgreSQL schema migrations
+- Optional PostgreSQL runtime configuration through DATABASE_URL
+- PostgreSQL integration tests in CI
 - Fixed-point decimal parsing without floating-point arithmetic
 - `POST /v1/orders` endpoint
 - `GET /v1/orders/{id}` endpoint
@@ -508,6 +513,17 @@ pulseops/
 │   │   ├── router.go
 │   │   └── router_test.go
 │   │
+│   ├── postgres/
+│   │   ├── migrate.go
+│   │   ├── pool.go
+│   │   ├── store.go
+│   │   ├── store_integration_test.go
+│   │   └── migrations/
+│   │       ├── 001_create_orders.sql
+│   │       ├── 002_create_trades.sql
+│   │       ├── 003_create_trades_buy_index.sql
+│   │       └── 004_create_trades_sell_index.sql
+│   │
 │   ├── orders/
 │   │   ├── matching_engine.go
 │   │   ├── matching_engine_test.go
@@ -539,6 +555,7 @@ pulseops/
 ├── .gitignore
 ├── LICENSE
 ├── go.mod
+├── go.sum
 └── README.md
 ```
 
@@ -567,6 +584,12 @@ trading/service.go
 → order registry, independent symbol books, transactional working copies for submission, persistence-before-publication coordination, synchronized order lookup and cancellation, and snapshots
 trading/store.go
 → persistence port for atomic application state changes without coupling the service to PostgreSQL
+postgres/pool.go
+→ pgxpool creation, DATABASE_URL parsing, connection timeout, and startup connectivity validation
+postgres/migrate.go
+→ embedded tracked migrations executed transactionally under a PostgreSQL advisory lock
+postgres/store.go
+→ PostgreSQL StateStore implementation with transactional order upserts and trade inserts
 order.go
 → Order entity and construction
 order_lifecycle.go
@@ -585,9 +608,11 @@ Tests are colocated with their corresponding HTTP, application-service, and doma
 
 For order submission, `trading.Service` locks the shared state, creates a working book with copies of its active orders, and clones the matching engine. It stages the incoming order and runs matching only against these working objects. A matching error discards all working state; success commits updated order references (including fully filled orders removed from the working book), the incoming order, the resulting book, and the advanced engine before releasing the exclusive lock. The book and registry therefore reference the same committed `Order` instances for active orders.
 
-Before publishing a successful submission in memory, `trading.Service` sends the resulting order snapshots and trades to its `StateStore`. A store error aborts publication, preserving the previously committed in-memory book, registry, and trade-ID sequence. The HTTP request context is propagated into this boundary so future database work can observe cancellation and deadlines.
+Before publishing a successful submission or cancellation in memory, `trading.Service` sends the resulting order snapshots and trades to its `StateStore`. A store error aborts publication, preserving the previously committed in-memory book, registry, and trade-ID sequence. HTTP request contexts are propagated into this boundary so PostgreSQL work observes cancellation and deadlines.
 
-The default store is currently a no-op, so this establishes the persistence contract but does not yet provide durable storage. PostgreSQL implementation, database transactions, startup recovery, and cross-process coordination remain future work. `GetOrder` and `CancelOrder` remain synchronized through the same service mutex.
+When `DATABASE_URL` is configured, the PostgreSQL StateStore wraps every StateChange in one database transaction: all order snapshots are inserted or updated first, followed by trade inserts. Any failure rolls back the entire state change. Order IDs cannot silently overwrite different immutable order data. Migrations are embedded in the binary, tracked in `schema_migrations`, and run transactionally at startup under an advisory lock.
+
+The in-memory registry and order books are still the runtime source used by GET and matching. Persisted state is not loaded back into memory on startup yet, and the in-memory trade sequence is not recovered from PostgreSQL. Therefore process-crash recovery and safe multi-process matching are still future work.
 
 The architecture will continue to evolve with persistence, controlled concurrent matching, Redis, observability, and infrastructure.
 
@@ -724,16 +749,16 @@ The current matching engine intentionally prioritizes correctness and domain mod
 
 Current limitations include:
 
-- Application state is stored only in memory.
+- Runtime matching state is still held in memory; PostgreSQL can durably store submitted/cancelled order snapshots and trades, but startup recovery is not implemented yet.
 - Matching is sequential.
 - Order submission, matching, and cancellation currently use an exclusive lock; order lookup uses a shared read lock.
 - The order book is not safe for unsynchronized concurrent access outside the application service.
 - Order submission provides in-memory atomicity for errors returned during matching by using independent working copies of the affected order book, its active orders, and the matching engine.
-- A `StateStore` persistence boundary exists, but the default implementation is still a no-op; transactional PostgreSQL persistence and recovery from process crashes are not yet implemented.
+- PostgreSQL StateStore writes are transactional, but the default runtime remains in-memory when DATABASE_URL is unset and persisted state is not restored after a restart.
 - Each submission clones the active orders of its symbol, which introduces additional memory and processing costs for large order books.
 - Order-book data structures are not optimized for very large books.
 - Trade IDs are generated using an in-memory sequence and are not durable across process restarts.
-- No PostgreSQL persistence or Redis integration exists yet. The service does not provide cross-process coordination or durable transactions.
+- PostgreSQL persistence does not yet provide startup recovery, durable restoration of the trade-ID sequence, or cross-process matching coordination. Redis integration does not exist yet.
 - Authentication and authorization have not yet been implemented.
 - The HTTP API is intended for educational simulation, not production trading.
 - Linux CI is configured to run the Go race detector with CGO enabled. Local Windows race-detector execution still requires CGO and a compatible C compiler.
@@ -746,9 +771,8 @@ PulseOps is planned to include:
 
 - Additional REST endpoints using `net/http` (with optional routing libraries if needed)
 - Best bid / best ask market quotes
-- PostgreSQL persistence
-- Database migrations
-- Durable transactional order and trade persistence with process-crash recovery
+- Startup recovery from PostgreSQL
+- Durable restoration of the trade-ID sequence
 - Evaluation of incremental or otherwise more efficient staging for large order books
 - Idempotency keys
 - Redis
@@ -766,6 +790,7 @@ Technologies will be introduced only when the application reaches a problem that
 ## Requirements
 
 - Go 1.27+
+- PostgreSQL 18.x when persistent mode is enabled
 
 Check your installation:
 
@@ -775,9 +800,20 @@ go version
 
 ## Run
 
+Without `DATABASE_URL`, PulseOps keeps its in-memory-only development mode:
+
 ```bash
 go run ./cmd/api
 ```
+
+To enable PostgreSQL persistence, set the connection string through the environment instead of embedding credentials in code:
+
+```powershell
+$env:DATABASE_URL = "postgres://USER:PASSWORD@localhost:5432/pulseops?sslmode=disable"
+go run ./cmd/api
+```
+
+When PostgreSQL mode is enabled, startup validates the connection and applies pending embedded migrations before the HTTP server starts. Do not use `sslmode=disable` for remote or production database connections.
 
 This starts the HTTP server. The `GET /healthz` liveness endpoint, `POST /v1/orders` submission endpoint, `GET /v1/orders/{id}` lookup endpoint, and `DELETE /v1/orders/{id}` cancellation endpoint are available on port `8080` by default.
 
@@ -815,7 +851,7 @@ Invoke-RestMethod `
     -Method DELETE
 ```
 
-The in-memory order registry resets when the process restarts. Reusing an order ID during one process lifetime returns `409 Conflict`.
+The in-memory order registry resets when the process restarts. PostgreSQL mode preserves database rows, but the application does not load them back into the runtime registry yet. Reusing an order ID during one process lifetime returns `409 Conflict`.
 
 ## Development Validation
 
@@ -884,9 +920,11 @@ GitHub Actions validates pushes to `main`, pull requests, and manual workflow ru
 
 The CI pipeline verifies:
 
+- module metadata with `go mod tidy`
 - Go formatting without silently committing formatter changes
 - `go vet ./...`
 - uncached unit and integration tests with `go test -count=1 ./...`
+- PostgreSQL integration tests against PostgreSQL 18.6
 - `go test -race -count=1 ./...` on Linux with CGO enabled
 
 The workflow uses read-only repository permissions and pins third-party action references to immutable commit SHAs.
@@ -938,6 +976,12 @@ Current tests cover behavior including:
 - `TestSubmitOrderFailureDoesNotConsumeTradeSequence`: failed matching does not consume confirmed trade IDs
 - `TestSubmitOrderPersistenceFailureDoesNotPublishState`: persistence errors do not publish provisional state or consume trade IDs
 - `TestSubmitOrderPassesContextAndStateToStore`: request context, updated order snapshots, and trades reach the persistence boundary
+- cancellation persistence failures do not publish cancelled state
+- cancellation request context and cancelled snapshots reach the persistence boundary
+- PostgreSQL migrations are repeatable and tracked
+- PostgreSQL StateStore persists orders and trades atomically
+- PostgreSQL StateStore rolls back the entire StateChange when a trade insert fails
+- PostgreSQL StateStore rejects immutable order-ID conflicts
 - `TestOrderBookClonePreservesPriorityAndIsolation`: cloned books preserve FIFO and do not share mutable orders
 - `TestOrderBookClonePreservesCrossSideSequence`: clone preserves insertion priority across BUY and SELL sides
 - `GET /healthz` handler behavior
@@ -966,7 +1010,7 @@ Coverage is used as feedback rather than as the sole measure of test quality.
 
 In-memory atomicity for matching errors is implemented using independent working copies and deferred publication. This does not provide durable transactions or recovery after a process crash.
 
-The persistence boundary and request-context propagation are implemented. The next milestone is a PostgreSQL-backed `StateStore` with schema migrations and transactional order/trade writes, followed by startup recovery, controlled concurrent matching, and evaluation of more efficient staging for large books. Subsequent phases will introduce idempotency, Redis, observability, deployment automation, and Kubernetes infrastructure.
+The PostgreSQL-backed StateStore, schema migrations, transactional order/trade writes, and cancellation persistence are implemented. The next milestone is startup recovery of orders, active books, and the trade-ID sequence, followed by controlled concurrent matching and evaluation of more efficient staging for large books. Subsequent phases will introduce idempotency, Redis, observability, deployment automation, and Kubernetes infrastructure.
 
 ## License
 

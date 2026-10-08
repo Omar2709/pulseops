@@ -15,7 +15,10 @@ func (h *Handler) CancelOrder(
 ) {
 	id := r.PathValue("id")
 
-	order, err := h.trading.CancelOrder(id)
+	order, err := h.trading.CancelOrder(
+		r.Context(),
+		id,
+	)
 	if err != nil {
 		switch {
 		case errors.Is(err, trading.ErrOrderNotFound):

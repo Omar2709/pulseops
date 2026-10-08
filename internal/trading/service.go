@@ -236,6 +236,7 @@ func (s *Service) GetOrder(
 // CancelOrder removes an active order from its book but keeps it in the
 // registry so it remains available through GetOrder.
 func (s *Service) CancelOrder(
+	ctx context.Context,
 	id string,
 ) (OrderSnapshot, error) {
 	s.mu.Lock()
@@ -261,13 +262,43 @@ func (s *Service) CancelOrder(
 		)
 	}
 
-	if err := book.Cancel(order.ID(), s.now()); err != nil {
+	workingBook, workingOrders := book.Clone()
+
+	workingOrder, exists := workingOrders[order.ID()]
+	if !exists {
+		return OrderSnapshot{}, fmt.Errorf(
+			"missing cloned order %s",
+			order.ID(),
+		)
+	}
+
+	if err := workingBook.Cancel(
+		workingOrder.ID(),
+		s.now(),
+	); err != nil {
 		return OrderSnapshot{}, fmt.Errorf(
 			"cancel order %s: %w",
-			order.ID(),
+			workingOrder.ID(),
 			err,
 		)
 	}
 
-	return snapshotOrder(order), nil
+	cancelled := snapshotOrder(workingOrder)
+
+	if err := s.store.Apply(
+		ctx,
+		StateChange{
+			Orders: []OrderSnapshot{cancelled},
+		},
+	); err != nil {
+		return OrderSnapshot{}, fmt.Errorf(
+			"persist order cancellation: %w",
+			err,
+		)
+	}
+
+	s.books[workingOrder.Symbol()] = workingBook
+	s.orders[workingOrder.ID()] = workingOrder
+
+	return cancelled, nil
 }
