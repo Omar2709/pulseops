@@ -10,7 +10,7 @@ import (
 )
 
 var (
-	ErrOrderBookNilOrder       = errors.New("order cannot be nil")
+	ErrOrderBookNilOrder          = errors.New("order cannot be nil")
 	ErrOrderBookDuplicateOrder    = errors.New("order already exists in order book")
 	ErrOrderBookDuplicateSequence = errors.New("order book sequence already exists")
 	ErrOrderBookSequenceExhausted = errors.New("order book sequence exhausted")
