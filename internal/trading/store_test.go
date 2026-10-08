@@ -247,3 +247,150 @@ func TestSubmitOrderPassesContextAndStateToStore(
 		)
 	}
 }
+
+func TestCancelOrderPersistenceFailureDoesNotPublishState(
+	t *testing.T,
+) {
+	now := testTime()
+
+	service := newServiceWithStore(
+		func() time.Time {
+			return now
+		},
+		noopStateStore{},
+	)
+
+	_, err := service.SubmitOrder(
+		context.Background(),
+		SubmitOrderInput{
+			ID:       "buy-001",
+			Symbol:   "BTCUSD",
+			Side:     orders.SideBuy,
+			Price:    orders.Price(6_000_000),
+			Quantity: orders.Quantity(5_000_000),
+		},
+	)
+	if err != nil {
+		t.Fatalf("submitting order: %v", err)
+	}
+
+	before, err := service.GetOrder("buy-001")
+	if err != nil {
+		t.Fatalf("getting order before cancellation: %v", err)
+	}
+
+	persistErr := errors.New("persistence unavailable")
+	service.store = &recordingStateStore{err: persistErr}
+	now = now.Add(time.Second)
+
+	_, err = service.CancelOrder(
+		context.Background(),
+		"buy-001",
+	)
+	if !errors.Is(err, persistErr) {
+		t.Fatalf(
+			"expected persistence error, got %v",
+			err,
+		)
+	}
+
+	after, err := service.GetOrder("buy-001")
+	if err != nil {
+		t.Fatalf("getting order after failed cancellation: %v", err)
+	}
+
+	if after != before {
+		t.Error("order changed after failed cancellation persistence")
+	}
+
+	book := service.books["BTCUSD"]
+	if book == nil {
+		t.Fatal("expected BTCUSD order book")
+	}
+
+	if got := len(book.Bids()); got != 1 {
+		t.Errorf(
+			"expected original bid to remain active, got %d",
+			got,
+		)
+	}
+}
+
+func TestCancelOrderPassesContextAndStateToStore(
+	t *testing.T,
+) {
+	now := testTime()
+
+	service := newServiceWithStore(
+		func() time.Time {
+			return now
+		},
+		noopStateStore{},
+	)
+
+	_, err := service.SubmitOrder(
+		context.Background(),
+		SubmitOrderInput{
+			ID:       "buy-001",
+			Symbol:   "BTCUSD",
+			Side:     orders.SideBuy,
+			Price:    orders.Price(6_000_000),
+			Quantity: orders.Quantity(5_000_000),
+		},
+	)
+	if err != nil {
+		t.Fatalf("submitting order: %v", err)
+	}
+
+	recorder := &recordingStateStore{}
+	service.store = recorder
+	now = now.Add(time.Second)
+
+	const key stateStoreContextKey = "cancel-request-id"
+
+	ctx := context.WithValue(
+		context.Background(),
+		key,
+		"cancel-123",
+	)
+
+	cancelled, err := service.CancelOrder(
+		ctx,
+		"buy-001",
+	)
+	if err != nil {
+		t.Fatalf("cancelling order: %v", err)
+	}
+
+	if got := recorder.ctx.Value(key); got != "cancel-123" {
+		t.Errorf("context value not propagated: %v", got)
+	}
+
+	if len(recorder.change.Orders) != 1 {
+		t.Fatalf(
+			"expected 1 persisted order, got %d",
+			len(recorder.change.Orders),
+		)
+	}
+
+	persisted := recorder.change.Orders[0]
+
+	if persisted.ID != "buy-001" ||
+		persisted.Status != orders.OrderStatusCancelled {
+		t.Errorf(
+			"unexpected persisted cancellation: %+v",
+			persisted,
+		)
+	}
+
+	if len(recorder.change.Trades) != 0 {
+		t.Errorf(
+			"expected no cancellation trades, got %d",
+			len(recorder.change.Trades),
+		)
+	}
+
+	if cancelled != persisted {
+		t.Error("returned cancellation differs from persisted snapshot")
+	}
+}

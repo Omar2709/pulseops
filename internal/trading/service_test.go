@@ -515,7 +515,7 @@ func TestCancelOrderRemovesOpenOrderFromBook(
 
 	now = now.Add(time.Second)
 
-	cancelled, err := service.CancelOrder(" buy-001 ")
+	cancelled, err := service.CancelOrder(context.Background(), " buy-001 ")
 	if err != nil {
 		t.Fatalf("cancelling order: %v", err)
 	}
@@ -566,7 +566,7 @@ func TestCancelOrderRemovesOpenOrderFromBook(
 		t.Error("original submission snapshot was modified")
 	}
 
-	_, err = service.CancelOrder("buy-001")
+	_, err = service.CancelOrder(context.Background(), "buy-001")
 
 	if !errors.Is(err, ErrOrderNotCancellable) {
 		t.Fatalf(
@@ -642,7 +642,7 @@ func TestCancelOrderPreservesPartialFillAndPreventsFurtherMatching(
 	// Cancel the remaining quantity.
 	now = now.Add(time.Second)
 
-	cancelled, err := service.CancelOrder("sell-001")
+	cancelled, err := service.CancelOrder(context.Background(), "sell-001")
 	if err != nil {
 		t.Fatalf("cancelling partial order: %v", err)
 	}
@@ -763,7 +763,7 @@ func TestCancelOrderRejectsFilledOrder(t *testing.T) {
 
 	now = now.Add(time.Second)
 
-	_, err = service.CancelOrder("sell-001")
+	_, err = service.CancelOrder(context.Background(), "sell-001")
 
 	if !errors.Is(err, ErrOrderNotCancellable) {
 		t.Fatalf(
@@ -794,7 +794,7 @@ func TestCancelOrderRejectsFilledOrder(t *testing.T) {
 func TestCancelOrderReturnsNotFound(t *testing.T) {
 	service := NewService()
 
-	_, err := service.CancelOrder("unknown-order")
+	_, err := service.CancelOrder(context.Background(), "unknown-order")
 
 	if !errors.Is(err, ErrOrderNotFound) {
 		t.Fatalf(
