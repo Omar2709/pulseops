@@ -3,6 +3,7 @@ package orders
 import (
 	"errors"
 	"fmt"
+	"math"
 	"sort"
 	"strings"
 	"time"
@@ -10,8 +11,10 @@ import (
 
 var (
 	ErrOrderBookNilOrder       = errors.New("order cannot be nil")
-	ErrOrderBookDuplicateOrder = errors.New("order already exists in order book")
-	ErrOrderBookInactiveOrder  = errors.New("order must be open or partially filled")
+	ErrOrderBookDuplicateOrder    = errors.New("order already exists in order book")
+	ErrOrderBookDuplicateSequence = errors.New("order book sequence already exists")
+	ErrOrderBookSequenceExhausted = errors.New("order book sequence exhausted")
+	ErrOrderBookInactiveOrder     = errors.New("order must be open or partially filled")
 	ErrOrderBookOrderNotFound  = errors.New("order not found in order book")
 	ErrOrderBookSymbolMismatch = errors.New("order symbol does not match order book")
 )
@@ -36,6 +39,41 @@ func NewOrderBook() *OrderBook {
 }
 
 func (b *OrderBook) Add(order *Order) error {
+	if b.nextSequence == math.MaxUint64 {
+		return ErrOrderBookSequenceExhausted
+	}
+
+	return b.addAtSequence(order, b.nextSequence)
+}
+
+// Restore inserts an active order using its previously persisted sequence.
+func (b *OrderBook) Restore(
+	order *Order,
+	sequence uint64,
+) error {
+	if order == nil {
+		return ErrOrderBookNilOrder
+	}
+
+	if sequence == math.MaxUint64 {
+		return ErrOrderBookSequenceExhausted
+	}
+
+	if b.hasSequence(sequence) {
+		return fmt.Errorf(
+			"%w: %d",
+			ErrOrderBookDuplicateSequence,
+			sequence,
+		)
+	}
+
+	return b.addAtSequence(order, sequence)
+}
+
+func (b *OrderBook) addAtSequence(
+	order *Order,
+	sequence uint64,
+) error {
 	if order == nil {
 		return ErrOrderBookNilOrder
 	}
@@ -69,7 +107,7 @@ func (b *OrderBook) Add(order *Order) error {
 
 	entry := orderBookEntry{
 		order:    order,
-		sequence: b.nextSequence,
+		sequence: sequence,
 	}
 
 	switch order.Side() {
@@ -87,7 +125,10 @@ func (b *OrderBook) Add(order *Order) error {
 		b.symbol = order.Symbol()
 	}
 
-	b.nextSequence++
+	nextSequence := sequence + 1
+	if nextSequence > b.nextSequence {
+		b.nextSequence = nextSequence
+	}
 
 	return nil
 }
@@ -192,6 +233,40 @@ func (b *OrderBook) Asks() []*Order {
 	}
 
 	return orders
+}
+
+// Sequences returns a detached snapshot of active order insertion sequences.
+func (b *OrderBook) Sequences() map[string]uint64 {
+	sequences := make(
+		map[string]uint64,
+		len(b.bids)+len(b.asks),
+	)
+
+	for id, entry := range b.bids {
+		sequences[id] = entry.sequence
+	}
+
+	for id, entry := range b.asks {
+		sequences[id] = entry.sequence
+	}
+
+	return sequences
+}
+
+func (b *OrderBook) hasSequence(sequence uint64) bool {
+	for _, entry := range b.bids {
+		if entry.sequence == sequence {
+			return true
+		}
+	}
+
+	for _, entry := range b.asks {
+		if entry.sequence == sequence {
+			return true
+		}
+	}
+
+	return false
 }
 
 func (b *OrderBook) contains(orderID string) bool {

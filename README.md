@@ -4,7 +4,7 @@ PulseOps is a trading and order-matching backend built with Go.
 
 The project is being developed progressively to explore production-oriented backend engineering concepts including domain modeling, order matching, concurrency, transactional consistency, idempotency, PostgreSQL, Redis, observability, Docker, Kubernetes, and CI/CD.
 
-The current implementation provides an in-memory trading application service, a sequential matching engine, and an HTTP API for submitting, retrieving, and cancelling limit orders. Order submission and cancellation provide persistence-before-publication semantics through a pluggable StateStore. When DATABASE_URL is configured, PostgreSQL stores order snapshots and trades transactionally; without it, the service keeps the existing in-memory-only behavior. Submission, matching, and cancellation are serialized using an exclusive lock, while order lookup uses a read lock; controlled concurrent matching will be introduced in a later phase.
+The current implementation provides an in-memory trading application service, a sequential matching engine, and an HTTP API for submitting, retrieving, and cancelling limit orders. Order submission and cancellation provide persistence-before-publication semantics through a pluggable StateStore. When DATABASE_URL is configured, PostgreSQL stores order snapshots and trades transactionally and rebuilds the order registry, exact active-book FIFO sequences, and matching-engine trade sequence during startup; without it, the service keeps the existing in-memory-only behavior. Submission, matching, and cancellation are serialized using an exclusive lock, while order lookup uses a read lock; controlled concurrent matching will be introduced in a later phase.
 
 > PulseOps is an educational trading-system simulation. It is not intended for real-money trading.
 
@@ -68,6 +68,10 @@ Implemented:
 - Embedded, tracked PostgreSQL schema migrations
 - Optional PostgreSQL runtime configuration through DATABASE_URL
 - PostgreSQL integration tests in CI
+- Exact PostgreSQL startup recovery of the order registry
+- Persisted FIFO book sequences for active orders
+- Durable matching-engine trade sequence recovery
+- Recovery validation through domain lifecycle invariants
 - Fixed-point decimal parsing without floating-point arithmetic
 - `POST /v1/orders` endpoint
 - `GET /v1/orders/{id}` endpoint
@@ -522,15 +526,20 @@ pulseops/
 │   │       ├── 001_create_orders.sql
 │   │       ├── 002_create_trades.sql
 │   │       ├── 003_create_trades_buy_index.sql
-│   │       └── 004_create_trades_sell_index.sql
+│   │       ├── 004_create_trades_sell_index.sql
+│   │       ├── 005_add_order_book_sequence.sql
+│   │       └── 006_create_matching_engine_state.sql
 │   │
 │   ├── orders/
 │   │   ├── matching_engine.go
 │   │   ├── matching_engine_test.go
 │   │   ├── order.go
+│   │   ├── order_restore.go
+│   │   ├── order_restore_test.go
 │   │   ├── order_test.go
 │   │   ├── order_book.go
 │   │   ├── order_book_clone_test.go
+│   │   ├── order_book_recovery_test.go
 │   │   ├── order_book_test.go
 │   │   ├── order_lifecycle.go
 │   │   ├── order_lifecycle_test.go
@@ -546,6 +555,8 @@ pulseops/
 │   │   └── trade_test.go
 │   │
 │   └── trading/
+│       ├── recovery.go
+│       ├── recovery_test.go
 │       ├── service.go
 │       ├── service_test.go
 │       ├── store.go
@@ -589,7 +600,7 @@ postgres/pool.go
 postgres/migrate.go
 → embedded tracked migrations executed transactionally under a PostgreSQL advisory lock
 postgres/store.go
-→ PostgreSQL StateStore implementation with transactional order upserts and trade inserts
+→ PostgreSQL StateStore and StateLoader with transactional writes plus startup recovery of orders, FIFO sequences, and trade sequence
 order.go
 → Order entity and construction
 order_lifecycle.go
@@ -612,7 +623,7 @@ Before publishing a successful submission or cancellation in memory, `trading.Se
 
 When `DATABASE_URL` is configured, the PostgreSQL StateStore wraps every StateChange in one database transaction: all order snapshots are inserted or updated first, followed by trade inserts. Any failure rolls back the entire state change. Order IDs cannot silently overwrite different immutable order data. Migrations are embedded in the binary, tracked in `schema_migrations`, and run transactionally at startup under an advisory lock.
 
-The in-memory registry and order books are still the runtime source used by GET and matching. Persisted state is not loaded back into memory on startup yet, and the in-memory trade sequence is not recovered from PostgreSQL. Therefore process-crash recovery and safe multi-process matching are still future work.
+The in-memory registry and order books remain the runtime source used by GET and matching, but PostgreSQL mode now rebuilds them before the HTTP server starts. Active orders recover their persisted book sequence rather than deriving priority from timestamps, and the matching engine resumes from its durable trade sequence. A committed database change therefore survives a single-process crash and is reflected after restart. Safe multi-process matching is still future work because each process owns an independent in-memory book.
 
 The architecture will continue to evolve with persistence, controlled concurrent matching, Redis, observability, and infrastructure.
 
@@ -696,7 +707,7 @@ Responses:
 
 Go's standard `ServeMux` also accepts `HEAD` requests for routes registered with `GET`.
 
-Order lookup returns snapshots instead of exposing mutable domain entities. Data remains in memory and is lost when the application restarts.
+Order lookup returns snapshots instead of exposing mutable domain entities. In-memory-only mode loses state on restart; PostgreSQL mode restores persisted orders into the runtime registry before serving requests.
 
 Authentication and authorization are not yet implemented. This API must not be exposed publicly in its current form.
 
@@ -739,9 +750,9 @@ Responses:
 - `405 Method Not Allowed`: the HTTP method is not supported. The `Allow` header includes `GET`, `HEAD`, and `DELETE` for this order-resource route.
 - `500 Internal Server Error`: an unexpected internal failure occurred.
 
-The application service holds an exclusive `sync.RWMutex` lock during cancellation, preventing concurrent order submission or matching through that service. The domain's `OrderBook.Cancel` performs the state transition before removing the order from the active book. This is not durable transaction handling across process failures.
+The application service holds an exclusive `sync.RWMutex` lock during cancellation, preventing concurrent order submission or matching through that service. Cancellation is staged on a working book and persisted before publication. In PostgreSQL mode, a committed cancellation is recovered after a single-process restart.
 
-State is held in memory and is lost when the application restarts. Authentication and authorization are not implemented, so this API must not be exposed publicly in its current form.
+Runtime state is held in memory; PostgreSQL mode restores its durable state after restart, while in-memory-only mode does not. Authentication and authorization are not implemented, so this API must not be exposed publicly in its current form.
 
 ## Current Limitations
 
@@ -749,19 +760,21 @@ The current matching engine intentionally prioritizes correctness and domain mod
 
 Current limitations include:
 
-- Runtime matching state is still held in memory; PostgreSQL can durably store submitted/cancelled order snapshots and trades, but startup recovery is not implemented yet.
+- Runtime matching state is still held in memory, but PostgreSQL mode rebuilds it at startup from durable orders, active-book sequences, and the matching-engine sequence.
 - Matching is sequential.
 - Order submission, matching, and cancellation currently use an exclusive lock; order lookup uses a shared read lock.
 - The order book is not safe for unsynchronized concurrent access outside the application service.
 - Order submission provides in-memory atomicity for errors returned during matching by using independent working copies of the affected order book, its active orders, and the matching engine.
-- PostgreSQL StateStore writes are transactional, but the default runtime remains in-memory when DATABASE_URL is unset and persisted state is not restored after a restart.
+- The default runtime remains in-memory when DATABASE_URL is unset; only PostgreSQL mode provides durable restart recovery.
 - Each submission clones the active orders of its symbol, which introduces additional memory and processing costs for large order books.
 - Order-book data structures are not optimized for very large books.
-- Trade IDs are generated using an in-memory sequence and are not durable across process restarts.
-- PostgreSQL persistence does not yet provide startup recovery, durable restoration of the trade-ID sequence, or cross-process matching coordination. Redis integration does not exist yet.
+- Trade IDs use an in-memory sequence during execution; PostgreSQL mode persists and restores that sequence, while in-memory-only mode resets it on restart.
+- PostgreSQL recovery is single-process only; cross-process matching coordination is not implemented. Redis integration does not exist yet.
 - Authentication and authorization have not yet been implemented.
 - The HTTP API is intended for educational simulation, not production trading.
 - Linux CI is configured to run the Go race detector with CGO enabled. Local Windows race-detector execution still requires CGO and a compatible C compiler.
+
+- Migration 005 intentionally refuses to infer FIFO priority for legacy active orders that were persisted before book sequences existed; those active rows must be drained or cleared before that migration can be applied.
 
 These limitations will be addressed progressively rather than adding infrastructure before the corresponding problem exists.
 
@@ -771,8 +784,7 @@ PulseOps is planned to include:
 
 - Additional REST endpoints using `net/http` (with optional routing libraries if needed)
 - Best bid / best ask market quotes
-- Startup recovery from PostgreSQL
-- Durable restoration of the trade-ID sequence
+- Multi-process matching coordination
 - Evaluation of incremental or otherwise more efficient staging for large order books
 - Idempotency keys
 - Redis
@@ -813,7 +825,7 @@ $env:DATABASE_URL = "postgres://USER:PASSWORD@localhost:5432/pulseops?sslmode=di
 go run ./cmd/api
 ```
 
-When PostgreSQL mode is enabled, startup validates the connection and applies pending embedded migrations before the HTTP server starts. Do not use `sslmode=disable` for remote or production database connections.
+When PostgreSQL mode is enabled, startup validates the connection, applies pending embedded migrations, loads durable orders and sequencing state, and rebuilds the in-memory service before the HTTP server starts. Do not use `sslmode=disable` for remote or production database connections.
 
 This starts the HTTP server. The `GET /healthz` liveness endpoint, `POST /v1/orders` submission endpoint, `GET /v1/orders/{id}` lookup endpoint, and `DELETE /v1/orders/{id}` cancellation endpoint are available on port `8080` by default.
 
@@ -851,7 +863,7 @@ Invoke-RestMethod `
     -Method DELETE
 ```
 
-The in-memory order registry resets when the process restarts. PostgreSQL mode preserves database rows, but the application does not load them back into the runtime registry yet. Reusing an order ID during one process lifetime returns `409 Conflict`.
+The in-memory-only registry resets when the process restarts. PostgreSQL mode restores the registry, active order books with exact FIFO priority, and the confirmed trade sequence before serving requests. Reusing an order ID during one process lifetime returns `409 Conflict`.
 
 ## Development Validation
 
@@ -982,6 +994,9 @@ Current tests cover behavior including:
 - PostgreSQL StateStore persists orders and trades atomically
 - PostgreSQL StateStore rolls back the entire StateChange when a trade insert fails
 - PostgreSQL StateStore rejects immutable order-ID conflicts
+- order lifecycle restoration rejects impossible persisted states
+- order-book restoration preserves persisted FIFO sequence exactly
+- PostgreSQL restart recovery preserves active-order priority and the next trade ID
 - `TestOrderBookClonePreservesPriorityAndIsolation`: cloned books preserve FIFO and do not share mutable orders
 - `TestOrderBookClonePreservesCrossSideSequence`: clone preserves insertion priority across BUY and SELL sides
 - `GET /healthz` handler behavior
@@ -1008,9 +1023,9 @@ Coverage is used as feedback rather than as the sole measure of test quality.
 
 ## Roadmap
 
-In-memory atomicity for matching errors is implemented using independent working copies and deferred publication. This does not provide durable transactions or recovery after a process crash.
+In-memory atomicity for matching errors is implemented using independent working copies and deferred publication. PostgreSQL mode adds transactional durable writes and startup recovery for a single service process.
 
-The PostgreSQL-backed StateStore, schema migrations, transactional order/trade writes, and cancellation persistence are implemented. The next milestone is startup recovery of orders, active books, and the trade-ID sequence, followed by controlled concurrent matching and evaluation of more efficient staging for large books. Subsequent phases will introduce idempotency, Redis, observability, deployment automation, and Kubernetes infrastructure.
+The PostgreSQL-backed StateStore, schema migrations, transactional order/trade writes, cancellation persistence, exact active-book FIFO recovery, and durable trade-sequence recovery are implemented. The next milestone is controlled concurrent matching and evaluation of more efficient staging for large books. Subsequent phases will introduce idempotency, Redis, observability, deployment automation, and Kubernetes infrastructure.
 
 ## License
 

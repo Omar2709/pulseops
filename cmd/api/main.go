@@ -54,12 +54,39 @@ func main() {
 			)
 		}
 
+		recovery, err := store.Load(ctx)
+		if err != nil {
+			cancel()
+			pool.Close()
+			log.Fatalf(
+				"PostgreSQL recovery load failed: %v",
+				err,
+			)
+		}
+
+		recoveredService, err := trading.NewRecoveredService(
+			store,
+			recovery,
+		)
+		if err != nil {
+			cancel()
+			pool.Close()
+			log.Fatalf(
+				"service recovery failed: %v",
+				err,
+			)
+		}
+
 		cancel()
 		defer pool.Close()
 
-		tradingService = trading.NewServiceWithStore(store)
+		tradingService = recoveredService
 
-		log.Println("PostgreSQL persistence enabled")
+		log.Printf(
+			"PostgreSQL persistence enabled; recovered %d orders at trade sequence %d",
+			len(recovery.Orders),
+			recovery.TradeSequence,
+		)
 	} else {
 		log.Println(
 			"DATABASE_URL is not set; using in-memory persistence",

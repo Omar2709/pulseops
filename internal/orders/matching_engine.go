@@ -19,6 +19,20 @@ func NewMatchingEngine() *MatchingEngine {
 	return &MatchingEngine{}
 }
 
+// NewMatchingEngineWithSequence restores the confirmed trade sequence.
+func NewMatchingEngineWithSequence(
+	sequence uint64,
+) *MatchingEngine {
+	return &MatchingEngine{
+		nextTradeSequence: sequence,
+	}
+}
+
+// TradeSequence returns the last confirmed trade sequence.
+func (e *MatchingEngine) TradeSequence() uint64 {
+	return e.nextTradeSequence
+}
+
 func (e *MatchingEngine) Match(
 	book *OrderBook,
 	at time.Time,
