@@ -176,6 +176,7 @@ func (h *Handler) SubmitOrder(
 
 	// Submit the validated order.
 	result, err := h.trading.SubmitOrder(
+		r.Context(),
 		trading.SubmitOrderInput{
 			ID:       request.ID,
 			Symbol:   request.Symbol,

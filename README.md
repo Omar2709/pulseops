@@ -60,6 +60,9 @@ Implemented:
 - `MatchingEngine.Clone()` preserving the confirmed trade-ID sequence
 - Deferred publication of updated orders, the order book, and the matching engine after successful matching
 - Failed matching leaves the order registry, active book, and confirmed trade-ID sequence unchanged
+- Pluggable `StateStore` persistence boundary for order submission
+- Request context propagation from HTTP submission into the persistence boundary
+- Persistence failures leave in-memory orders, books, and trade-ID sequence unpublished
 - Fixed-point decimal parsing without floating-point arithmetic
 - `POST /v1/orders` endpoint
 - `GET /v1/orders/{id}` endpoint
@@ -528,7 +531,9 @@ pulseops/
 │   │
 │   └── trading/
 │       ├── service.go
-│       └── service_test.go
+│       ├── service_test.go
+│       ├── store.go
+│       └── store_test.go
 │
 ├── .gitattributes
 ├── .gitignore
@@ -559,7 +564,9 @@ httpapi/decimal.go
 httpapi/response.go
 → JSON response and standardized error helpers
 trading/service.go
-→ order registry, independent symbol books, transactional working copies for submission, deferred state publication, synchronized order lookup and cancellation, and snapshots
+→ order registry, independent symbol books, transactional working copies for submission, persistence-before-publication coordination, synchronized order lookup and cancellation, and snapshots
+trading/store.go
+→ persistence port for atomic application state changes without coupling the service to PostgreSQL
 order.go
 → Order entity and construction
 order_lifecycle.go
@@ -578,7 +585,9 @@ Tests are colocated with their corresponding HTTP, application-service, and doma
 
 For order submission, `trading.Service` locks the shared state, creates a working book with copies of its active orders, and clones the matching engine. It stages the incoming order and runs matching only against these working objects. A matching error discards all working state; success commits updated order references (including fully filled orders removed from the working book), the incoming order, the resulting book, and the advanced engine before releasing the exclusive lock. The book and registry therefore reference the same committed `Order` instances for active orders.
 
-This is in-memory atomicity for errors returned during submission and matching, not durable database transactions or process-crash recovery. `GetOrder` and `CancelOrder` remain synchronized through the same service mutex.
+Before publishing a successful submission in memory, `trading.Service` sends the resulting order snapshots and trades to its `StateStore`. A store error aborts publication, preserving the previously committed in-memory book, registry, and trade-ID sequence. The HTTP request context is propagated into this boundary so future database work can observe cancellation and deadlines.
+
+The default store is currently a no-op, so this establishes the persistence contract but does not yet provide durable storage. PostgreSQL implementation, database transactions, startup recovery, and cross-process coordination remain future work. `GetOrder` and `CancelOrder` remain synchronized through the same service mutex.
 
 The architecture will continue to evolve with persistence, controlled concurrent matching, Redis, observability, and infrastructure.
 
@@ -720,7 +729,7 @@ Current limitations include:
 - Order submission, matching, and cancellation currently use an exclusive lock; order lookup uses a shared read lock.
 - The order book is not safe for unsynchronized concurrent access outside the application service.
 - Order submission provides in-memory atomicity for errors returned during matching by using independent working copies of the affected order book, its active orders, and the matching engine.
-- Transactional database persistence and recovery from process crashes are not yet implemented.
+- A `StateStore` persistence boundary exists, but the default implementation is still a no-op; transactional PostgreSQL persistence and recovery from process crashes are not yet implemented.
 - Each submission clones the active orders of its symbol, which introduces additional memory and processing costs for large order books.
 - Order-book data structures are not optimized for very large books.
 - Trade IDs are generated using an in-memory sequence and are not durable across process restarts.
@@ -927,6 +936,8 @@ Current tests cover behavior including:
 - `TestSubmitOrderMatchingFailureDoesNotChangeState`: failed incoming orders leave no registry or book changes
 - `TestSubmitOrderFailureAfterFirstTradeDoesNotChangeState`: a later matching failure discards earlier provisional fills
 - `TestSubmitOrderFailureDoesNotConsumeTradeSequence`: failed matching does not consume confirmed trade IDs
+- `TestSubmitOrderPersistenceFailureDoesNotPublishState`: persistence errors do not publish provisional state or consume trade IDs
+- `TestSubmitOrderPassesContextAndStateToStore`: request context, updated order snapshots, and trades reach the persistence boundary
 - `TestOrderBookClonePreservesPriorityAndIsolation`: cloned books preserve FIFO and do not share mutable orders
 - `TestOrderBookClonePreservesCrossSideSequence`: clone preserves insertion priority across BUY and SELL sides
 - `GET /healthz` handler behavior
@@ -955,7 +966,7 @@ Coverage is used as feedback rather than as the sole measure of test quality.
 
 In-memory atomicity for matching errors is implemented using independent working copies and deferred publication. This does not provide durable transactions or recovery after a process crash.
 
-Next milestones include transactional PostgreSQL persistence and recovery, followed by controlled concurrent matching and evaluation of more efficient staging for large books. Subsequent phases will introduce idempotency, Redis, observability, deployment automation, and Kubernetes infrastructure.
+The persistence boundary and request-context propagation are implemented. The next milestone is a PostgreSQL-backed `StateStore` with schema migrations and transactional order/trade writes, followed by startup recovery, controlled concurrent matching, and evaluation of more efficient staging for large books. Subsequent phases will introduce idempotency, Redis, observability, deployment automation, and Kubernetes infrastructure.
 
 ## License
 

@@ -1,6 +1,7 @@
 package trading
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"sync"
@@ -30,6 +31,7 @@ func TestSubmitOrderAddsOpenOrder(t *testing.T) {
 	})
 
 	result, err := service.SubmitOrder(
+		context.Background(),
 		SubmitOrderInput{
 			ID:       "buy-001",
 			Symbol:   "BTCUSD",
@@ -66,6 +68,7 @@ func TestSubmitOrderMatchesCrossingOrders(t *testing.T) {
 	})
 
 	_, err := service.SubmitOrder(
+		context.Background(),
 		SubmitOrderInput{
 			ID:       "sell-001",
 			Symbol:   "BTCUSD",
@@ -81,6 +84,7 @@ func TestSubmitOrderMatchesCrossingOrders(t *testing.T) {
 	now = now.Add(time.Second)
 
 	result, err := service.SubmitOrder(
+		context.Background(),
 		SubmitOrderInput{
 			ID:       "buy-001",
 			Symbol:   "BTCUSD",
@@ -119,6 +123,7 @@ func TestSubmitOrderRejectsDuplicateIDWithoutChangingState(
 	})
 
 	_, err := service.SubmitOrder(
+		context.Background(),
 		SubmitOrderInput{
 			ID:       "buy-001",
 			Symbol:   "BTCUSD",
@@ -134,6 +139,7 @@ func TestSubmitOrderRejectsDuplicateIDWithoutChangingState(
 	now = now.Add(time.Second)
 
 	result, err := service.SubmitOrder(
+		context.Background(),
 		SubmitOrderInput{
 			ID:       "buy-001",
 			Symbol:   "BTCUSD",
@@ -186,6 +192,7 @@ func TestSubmitOrderUsesIndependentBooksPerSymbol(
 	})
 
 	_, err := service.SubmitOrder(
+		context.Background(),
 		SubmitOrderInput{
 			ID:       "sell-btc-001",
 			Symbol:   "BTCUSD",
@@ -201,6 +208,7 @@ func TestSubmitOrderUsesIndependentBooksPerSymbol(
 	now = now.Add(time.Second)
 
 	result, err := service.SubmitOrder(
+		context.Background(),
 		SubmitOrderInput{
 			ID:       "buy-eth-001",
 			Symbol:   "ETHUSD",
@@ -238,6 +246,7 @@ func TestSubmitOrderKeepsFilledOrdersInRegistryAndRemovesThemFromBook(
 	})
 
 	_, err := service.SubmitOrder(
+		context.Background(),
 		SubmitOrderInput{
 			ID:       "sell-001",
 			Symbol:   "BTCUSD",
@@ -253,6 +262,7 @@ func TestSubmitOrderKeepsFilledOrdersInRegistryAndRemovesThemFromBook(
 	now = now.Add(time.Second)
 
 	_, err = service.SubmitOrder(
+		context.Background(),
 		SubmitOrderInput{
 			ID:       "buy-001",
 			Symbol:   "BTCUSD",
@@ -318,6 +328,7 @@ func TestSubmitOrderConcurrentRequests(t *testing.T) {
 			defer wg.Done()
 
 			_, err := service.SubmitOrder(
+				context.Background(),
 				SubmitOrderInput{
 					ID: fmt.Sprintf(
 						"buy-%03d",
@@ -375,6 +386,7 @@ func TestGetOrderReturnsCurrentSnapshot(t *testing.T) {
 	})
 
 	_, err := service.SubmitOrder(
+		context.Background(),
 		SubmitOrderInput{
 			ID:       "sell-001",
 			Symbol:   "BTCUSD",
@@ -404,6 +416,7 @@ func TestGetOrderReturnsCurrentSnapshot(t *testing.T) {
 	now = now.Add(time.Second)
 
 	_, err = service.SubmitOrder(
+		context.Background(),
 		SubmitOrderInput{
 			ID:       "buy-001",
 			Symbol:   "BTCUSD",
@@ -487,6 +500,7 @@ func TestCancelOrderRemovesOpenOrderFromBook(
 	})
 
 	created, err := service.SubmitOrder(
+		context.Background(),
 		SubmitOrderInput{
 			ID:       "buy-001",
 			Symbol:   "BTCUSD",
@@ -576,6 +590,7 @@ func TestCancelOrderPreservesPartialFillAndPreventsFurtherMatching(
 
 	// Register a SELL order for 0.05 BTC.
 	_, err := service.SubmitOrder(
+		context.Background(),
 		SubmitOrderInput{
 			ID:       "sell-001",
 			Symbol:   "BTCUSD",
@@ -592,6 +607,7 @@ func TestCancelOrderPreservesPartialFillAndPreventsFurtherMatching(
 	now = now.Add(time.Second)
 
 	result, err := service.SubmitOrder(
+		context.Background(),
 		SubmitOrderInput{
 			ID:       "buy-001",
 			Symbol:   "BTCUSD",
@@ -665,6 +681,7 @@ func TestCancelOrderPreservesPartialFillAndPreventsFurtherMatching(
 	now = now.Add(time.Second)
 
 	next, err := service.SubmitOrder(
+		context.Background(),
 		SubmitOrderInput{
 			ID:       "buy-002",
 			Symbol:   "BTCUSD",
@@ -715,6 +732,7 @@ func TestCancelOrderRejectsFilledOrder(t *testing.T) {
 	})
 
 	_, err := service.SubmitOrder(
+		context.Background(),
 		SubmitOrderInput{
 			ID:       "sell-001",
 			Symbol:   "BTCUSD",
@@ -730,6 +748,7 @@ func TestCancelOrderRejectsFilledOrder(t *testing.T) {
 	now = now.Add(time.Second)
 
 	_, err = service.SubmitOrder(
+		context.Background(),
 		SubmitOrderInput{
 			ID:       "buy-001",
 			Symbol:   "BTCUSD",
@@ -798,6 +817,7 @@ func TestSubmitOrderMatchingFailureDoesNotChangeState(
 	})
 
 	_, err := service.SubmitOrder(
+		context.Background(),
 		SubmitOrderInput{
 			ID:       "sell-001",
 			Symbol:   "BTCUSD",
@@ -820,6 +840,7 @@ func TestSubmitOrderMatchingFailureDoesNotChangeState(
 	now = now.Add(-time.Second)
 
 	_, err = service.SubmitOrder(
+		context.Background(),
 		SubmitOrderInput{
 			ID:       "buy-001",
 			Symbol:   "BTCUSD",
@@ -895,6 +916,7 @@ func TestSubmitOrderFailureAfterFirstTradeDoesNotChangeState(
 
 	// First SELL: created at T0.
 	_, err := service.SubmitOrder(
+		context.Background(),
 		SubmitOrderInput{
 			ID:       "sell-001",
 			Symbol:   "BTCUSD",
@@ -911,6 +933,7 @@ func TestSubmitOrderFailureAfterFirstTradeDoesNotChangeState(
 	now = start.Add(2 * time.Second)
 
 	_, err = service.SubmitOrder(
+		context.Background(),
 		SubmitOrderInput{
 			ID:       "sell-002",
 			Symbol:   "BTCUSD",
@@ -940,6 +963,7 @@ func TestSubmitOrderFailureAfterFirstTradeDoesNotChangeState(
 	now = start.Add(time.Second)
 
 	_, err = service.SubmitOrder(
+		context.Background(),
 		SubmitOrderInput{
 			ID:       "buy-001",
 			Symbol:   "BTCUSD",
@@ -1037,6 +1061,7 @@ func TestSubmitOrderFailureDoesNotConsumeTradeSequence(
 		t.Helper()
 
 		return service.SubmitOrder(
+			context.Background(),
 			SubmitOrderInput{
 				ID:       id,
 				Symbol:   "BTCUSD",

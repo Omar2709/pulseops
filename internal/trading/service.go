@@ -1,6 +1,7 @@
 package trading
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -62,6 +63,7 @@ type Service struct {
 	books  map[string]*orders.OrderBook
 	orders map[string]*orders.Order
 	engine *orders.MatchingEngine
+	store  StateStore
 	now    func() time.Time
 }
 
@@ -71,11 +73,35 @@ func NewService() *Service {
 	})
 }
 
+func NewServiceWithStore(store StateStore) *Service {
+	return newServiceWithStore(
+		func() time.Time {
+			return time.Now().UTC()
+		},
+		store,
+	)
+}
+
 func newService(now func() time.Time) *Service {
+	return newServiceWithStore(
+		now,
+		noopStateStore{},
+	)
+}
+
+func newServiceWithStore(
+	now func() time.Time,
+	store StateStore,
+) *Service {
+	if store == nil {
+		panic("state store cannot be nil")
+	}
+
 	return &Service{
 		books:  make(map[string]*orders.OrderBook),
 		orders: make(map[string]*orders.Order),
 		engine: orders.NewMatchingEngine(),
+		store:  store,
 		now:    now,
 	}
 }
@@ -83,6 +109,7 @@ func newService(now func() time.Time) *Service {
 // SubmitOrder stages all changes on independent copies and publishes them
 // only after matching completes successfully.
 func (s *Service) SubmitOrder(
+	ctx context.Context,
 	input SubmitOrderInput,
 ) (SubmitOrderResult, error) {
 	s.mu.Lock()
@@ -136,6 +163,37 @@ func (s *Service) SubmitOrder(
 	if err != nil {
 		// No changes have been committed.
 		return SubmitOrderResult{}, err
+	}
+
+	changedOrders := make(
+		[]OrderSnapshot,
+		0,
+		len(workingOrders)+1,
+	)
+
+	for _, updatedOrder := range workingOrders {
+		changedOrders = append(
+			changedOrders,
+			snapshotOrder(updatedOrder),
+		)
+	}
+
+	changedOrders = append(
+		changedOrders,
+		snapshotOrder(order),
+	)
+
+	if err := s.store.Apply(
+		ctx,
+		StateChange{
+			Orders: changedOrders,
+			Trades: trades,
+		},
+	); err != nil {
+		return SubmitOrderResult{}, fmt.Errorf(
+			"persist order submission: %w",
+			err,
+		)
 	}
 
 	// Commit the updated existing orders, including orders that were
