@@ -43,6 +43,17 @@ func testPostgresPool(t *testing.T) *pgxpool.Pool {
 		t.Fatalf("cleaning test tables: %v", err)
 	}
 
+	if _, err := pool.Exec(
+		ctx,
+		`
+			UPDATE matching_engine_state
+			SET trade_sequence = 0
+			WHERE id = 1
+		`,
+	); err != nil {
+		t.Fatalf("resetting matching engine state: %v", err)
+	}
+
 	return pool
 }
 
@@ -68,9 +79,9 @@ func TestMigrateIsIdempotent(t *testing.T) {
 		t.Fatalf("counting migrations: %v", err)
 	}
 
-	if count != 4 {
+	if count != 6 {
 		t.Errorf(
-			"expected 4 applied migrations, got %d",
+			"expected 6 applied migrations, got %d",
 			count,
 		)
 	}
@@ -149,7 +160,8 @@ func TestStoreApplyPersistsOrdersAndTrades(
 				sell,
 				buy,
 			},
-			Trades: []*orders.Trade{trade},
+			Trades:        []*orders.Trade{trade},
+			TradeSequence: 1,
 		},
 	); err != nil {
 		t.Fatalf("persisting state change: %v", err)
@@ -189,7 +201,8 @@ func TestStoreApplyPersistsOrdersAndTrades(
 	if err := store.Apply(
 		ctx,
 		trading.StateChange{
-			Orders: []trading.OrderSnapshot{cancelled},
+			Orders:        []trading.OrderSnapshot{cancelled},
+			TradeSequence: 1,
 		},
 	); err != nil {
 		t.Fatalf("persisting cancellation: %v", err)
@@ -291,7 +304,8 @@ func TestStoreApplyRollsBackWholeStateChange(
 				sell,
 				buy,
 			},
-			Trades: []*orders.Trade{trade},
+			Trades:        []*orders.Trade{trade},
+			TradeSequence: 1,
 		},
 	); err != nil {
 		t.Fatalf("seeding persisted trade: %v", err)
@@ -315,6 +329,10 @@ func TestStoreApplyRollsBackWholeStateChange(
 		trading.StateChange{
 			Orders: []trading.OrderSnapshot{extra},
 			Trades: []*orders.Trade{trade},
+			BookSequences: map[string]uint64{
+				"buy-extra": 0,
+			},
+			TradeSequence: 1,
 		},
 	)
 	if err == nil {
@@ -385,6 +403,9 @@ func TestStoreRejectsImmutableOrderConflict(
 		ctx,
 		trading.StateChange{
 			Orders: []trading.OrderSnapshot{original},
+			BookSequences: map[string]uint64{
+				"buy-001": 0,
+			},
 		},
 	); err != nil {
 		t.Fatalf("persisting original order: %v", err)
@@ -397,6 +418,9 @@ func TestStoreRejectsImmutableOrderConflict(
 		ctx,
 		trading.StateChange{
 			Orders: []trading.OrderSnapshot{conflict},
+			BookSequences: map[string]uint64{
+				"buy-001": 0,
+			},
 		},
 	); err == nil {
 		t.Fatal("expected immutable order conflict")

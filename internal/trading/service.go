@@ -186,8 +186,10 @@ func (s *Service) SubmitOrder(
 	if err := s.store.Apply(
 		ctx,
 		StateChange{
-			Orders: changedOrders,
-			Trades: trades,
+			Orders:        changedOrders,
+			Trades:        trades,
+			BookSequences: workingBook.Sequences(),
+			TradeSequence: workingEngine.TradeSequence(),
 		},
 	); err != nil {
 		return SubmitOrderResult{}, fmt.Errorf(
@@ -288,7 +290,8 @@ func (s *Service) CancelOrder(
 	if err := s.store.Apply(
 		ctx,
 		StateChange{
-			Orders: []OrderSnapshot{cancelled},
+			Orders:        []OrderSnapshot{cancelled},
+			TradeSequence: s.engine.TradeSequence(),
 		},
 	); err != nil {
 		return OrderSnapshot{}, fmt.Errorf(
