@@ -15,8 +15,8 @@ var (
 	ErrOrderBookDuplicateSequence = errors.New("order book sequence already exists")
 	ErrOrderBookSequenceExhausted = errors.New("order book sequence exhausted")
 	ErrOrderBookInactiveOrder     = errors.New("order must be open or partially filled")
-	ErrOrderBookOrderNotFound  = errors.New("order not found in order book")
-	ErrOrderBookSymbolMismatch = errors.New("order symbol does not match order book")
+	ErrOrderBookOrderNotFound     = errors.New("order not found in order book")
+	ErrOrderBookSymbolMismatch    = errors.New("order symbol does not match order book")
 )
 
 type orderBookEntry struct {

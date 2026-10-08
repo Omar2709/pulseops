@@ -130,9 +130,7 @@ func (s *Store) Apply(
 			)
 		}
 
-		sequence, hasSequence := change.BookSequences[
-			snapshot.ID
-		]
+		sequence, hasSequence := change.BookSequences[snapshot.ID]
 
 		active := snapshot.Status == orders.OrderStatusOpen ||
 			snapshot.Status == orders.OrderStatusPartiallyFilled
