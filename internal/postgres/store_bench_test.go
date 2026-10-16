@@ -85,8 +85,8 @@ func BenchmarkPostgresApplyResting(b *testing.B) {
 						CreatedAt:         at,
 						UpdatedAt:         at,
 					}},
-					BookSequences: map[string]uint64{id: n - 1},
-					TradeSequence:          0,
+					BookSequences:           map[string]uint64{id: n - 1},
+					TradeSequence:           0,
 					SkipTradeSequenceUpdate: true,
 				})
 			}

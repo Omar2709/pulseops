@@ -53,7 +53,7 @@ func TestRestingSubmissionAndCancellationDoNotWaitForTradeSequenceLock(t *testin
 		t.Fatalf("expected initial sequence 0, got %d", sequence)
 	}
 
-	// A regresssion that updates matching_engine_state on every write
+	// A regression that updates matching_engine_state on every write
 	// would block until the short request deadline and fail this test.
 	requestCtx, requestCancel := context.WithTimeout(ctx, 2*time.Second)
 	defer requestCancel()
