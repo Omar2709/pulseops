@@ -13,6 +13,12 @@ type StateChange struct {
 	Trades        []*orders.Trade
 	BookSequences map[string]uint64
 	TradeSequence uint64
+
+	// SkipTradeSequenceUpdate indicates that the service is committing a
+	// change with no new trades and the durable global trade sequence
+	// therefore does not need to be written. The service must ensure the
+	// sequence was already persisted. Direct store callers default to false.
+	SkipTradeSequenceUpdate bool
 }
 
 // RecoveredOrder contains one durable order and its active-book sequence.

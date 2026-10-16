@@ -275,6 +275,7 @@ func (s *Service) SubmitOrder(
 			Trades:        trades,
 			BookSequences: bookSequences,
 			TradeSequence: confirmedEngine.TradeSequence(),
+			SkipTradeSequenceUpdate: restingOnly,
 		},
 	); err != nil {
 		return SubmitOrderResult{}, fmt.Errorf(
@@ -396,6 +397,7 @@ func (s *Service) CancelOrder(
 		StateChange{
 			Orders:        []OrderSnapshot{cancelled},
 			TradeSequence: s.engine.TradeSequence(),
+			SkipTradeSequenceUpdate: true,
 		},
 	); err != nil {
 		return OrderSnapshot{}, fmt.Errorf(

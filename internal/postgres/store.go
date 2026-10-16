@@ -79,6 +79,14 @@ func (s *Store) Apply(
 		return nil
 	}
 
+	// Never suppress the durable trade counter when new trades are being
+	// inserted. This guard also protects clients of the StateStore port.
+	if change.SkipTradeSequenceUpdate && len(change.Trades) != 0 {
+		return errors.New(
+			"cannot skip trade sequence update when persisting trades",
+		)
+	}
+
 	if change.TradeSequence > math.MaxInt64 {
 		return fmt.Errorf(
 			"trade sequence exceeds PostgreSQL BIGINT",
@@ -229,27 +237,32 @@ func (s *Store) Apply(
 				}
 			}
 
-			tag, err := tx.Exec(
-				ctx,
-				`
-					UPDATE matching_engine_state
-					SET trade_sequence = $1
-					WHERE id = 1
-						AND trade_sequence <= $1
-				`,
-				int64(change.TradeSequence),
-			)
-			if err != nil {
-				return fmt.Errorf(
-					"persist matching engine sequence: %w",
-					err,
+			// Non-crossing submissions and cancellations do not advance the
+			// confirmed sequence. Avoid updating the shared PostgreSQL row:
+			// otherwise independent resting writes contend on its lock.
+			if !change.SkipTradeSequenceUpdate {
+				tag, err := tx.Exec(
+					ctx,
+					`
+						UPDATE matching_engine_state
+						SET trade_sequence = $1
+						WHERE id = 1
+							AND trade_sequence <= $1
+					`,
+					int64(change.TradeSequence),
 				)
-			}
+				if err != nil {
+					return fmt.Errorf(
+						"persist matching engine sequence: %w",
+						err,
+					)
+				}
 
-			if tag.RowsAffected() != 1 {
-				return fmt.Errorf(
-					"persist matching engine sequence: sequence regression or missing state",
-				)
+				if tag.RowsAffected() != 1 {
+					return fmt.Errorf(
+						"persist matching engine sequence: sequence regression or missing state",
+					)
+				}
 			}
 
 			return nil
