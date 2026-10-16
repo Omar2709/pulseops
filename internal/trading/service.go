@@ -60,12 +60,17 @@ type SubmitOrderResult struct {
 }
 
 type Service struct {
+	// mu protects the registry, books, global trade sequence, and commits.
 	mu     sync.RWMutex
 	books  map[string]*orders.OrderBook
 	orders map[string]*orders.Order
 	engine *orders.MatchingEngine
 	store  StateStore
 	now    func() time.Time
+
+	// Symbol-specific gates permit matching work on different books to
+	// proceed concurrently while retaining FIFO for each symbol.
+	symbolLocks sync.Map // map[string]*sync.Mutex
 }
 
 func NewService() *Service {
@@ -107,18 +112,37 @@ func newServiceWithStore(
 	}
 }
 
-// SubmitOrder stages all changes on independent copies and publishes them
-// only after matching completes successfully.
+// symbolLock returns the stable gate for one normalized symbol. Locks are
+// retained for the service lifetime; they must never be replaced while in use.
+func (s *Service) symbolLock(symbol string) *sync.Mutex {
+	lock, _ := s.symbolLocks.LoadOrStore(symbol, &sync.Mutex{})
+	return lock.(*sync.Mutex)
+}
+
+func replayOrder(existing, incoming *orders.Order) (SubmitOrderResult, error) {
+	if existing.Symbol() != incoming.Symbol() ||
+		existing.Side() != incoming.Side() ||
+		existing.Price() != incoming.Price() ||
+		existing.Quantity() != incoming.Quantity() {
+		return SubmitOrderResult{}, ErrDuplicateOrder
+	}
+
+	return SubmitOrderResult{
+		Order:    snapshotOrder(existing),
+		Replayed: true,
+	}, nil
+}
+
+// SubmitOrder builds a private working book under a per-symbol gate, then
+// assigns global trade IDs and persists under the service's commit lock.
+// Different symbols can match concurrently without duplicating trade IDs.
 func (s *Service) SubmitOrder(
 	ctx context.Context,
 	input SubmitOrderInput,
 ) (SubmitOrderResult, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
+	// Normalize/validate before obtaining the symbol gate. The incoming
+	// order is still private and cannot be observed by another request.
 	at := s.now()
-
-	// Validate and construct the incoming order.
 	order, err := orders.NewOrder(
 		input.ID,
 		input.Symbol,
@@ -131,70 +155,87 @@ func (s *Service) SubmitOrder(
 		return SubmitOrderResult{}, err
 	}
 
-	// The client-supplied order ID is the idempotency identity. Returning
-	// the current snapshot never re-runs matching or writes to the store.
-	if existing, exists := s.orders[order.ID()]; exists {
-		if existing.Symbol() != order.Symbol() ||
-			existing.Side() != order.Side() ||
-			existing.Price() != order.Price() ||
-			existing.Quantity() != order.Quantity() {
-			return SubmitOrderResult{}, ErrDuplicateOrder
-		}
+	gate := s.symbolLock(order.Symbol())
+	gate.Lock()
+	defer gate.Unlock()
 
-		return SubmitOrderResult{
-			Order:    snapshotOrder(existing),
-			Replayed: true,
-		}, nil
+	// The gate excludes all mutations of this symbol, including cancels.
+	// Different symbols can change the registry while this book is staged.
+	s.mu.RLock()
+	if existing, exists := s.orders[order.ID()]; exists {
+		result, err := replayOrder(existing, order)
+		s.mu.RUnlock()
+		return result, err
 	}
+	originalBook := s.books[order.Symbol()]
+	s.mu.RUnlock()
 
 	if err := order.Open(at); err != nil {
 		return SubmitOrderResult{}, err
 	}
 
-	// Prepare an independent working book.
 	var workingBook *orders.OrderBook
 	var workingOrders map[string]*orders.Order
-
-	originalBook, exists := s.books[order.Symbol()]
-
-	if exists {
+	if originalBook != nil {
+		// Safe without mu: the symbol gate excludes mutations of this book.
 		workingBook, workingOrders = originalBook.Clone()
 	} else {
 		workingBook = orders.NewOrderBook()
 		workingOrders = make(map[string]*orders.Order)
 	}
-
-	// Stage the incoming order without modifying service state.
 	if err := workingBook.Add(order); err != nil {
 		return SubmitOrderResult{}, err
 	}
 
-	// Matching uses an independent trade sequence.
-	workingEngine := s.engine.Clone()
-
-	trades, err := workingEngine.Match(workingBook, at)
+	// This engine is provisional: its temporary IDs are never published.
+	// Global IDs are allocated only after matching succeeds at commit time.
+	provisional, err := orders.NewMatchingEngine().Match(workingBook, at)
 	if err != nil {
-		// No changes have been committed.
 		return SubmitOrderResult{}, err
 	}
 
-	changedOrders := make(
-		[]OrderSnapshot,
-		0,
-		len(workingOrders)+1,
-	)
-
+	changedOrders := make([]OrderSnapshot, 0, len(workingOrders)+1)
 	for _, updatedOrder := range workingOrders {
-		changedOrders = append(
-			changedOrders,
-			snapshotOrder(updatedOrder),
-		)
+		changedOrders = append(changedOrders, snapshotOrder(updatedOrder))
+	}
+	changedOrders = append(changedOrders, snapshotOrder(order))
+
+	// Commit is globally serialized because trade IDs and durable sequence
+	// are global. The global gate also protects duplicate IDs across symbols.
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// An order with this ID may have committed on another symbol while
+	// the private working book was matching. Discard provisional work.
+	if existing, exists := s.orders[order.ID()]; exists {
+		return replayOrder(existing, order)
 	}
 
-	changedOrders = append(
-		changedOrders,
-		snapshotOrder(order),
-	)
+	sequence := s.engine.TradeSequence()
+	if uint64(len(provisional)) > ^uint64(0)-sequence {
+		return SubmitOrderResult{}, fmt.Errorf("trade sequence exhausted")
+	}
+
+	trades := make([]*orders.Trade, 0, len(provisional))
+	for _, tentative := range provisional {
+		sequence++
+		confirmed, err := orders.NewTrade(
+			fmt.Sprintf("trade-%06d", sequence),
+			tentative.Symbol(),
+			tentative.BuyOrderID(),
+			tentative.SellOrderID(),
+			tentative.Price(),
+			tentative.Quantity(),
+			tentative.ExecutedAt(),
+		)
+		if err != nil {
+			return SubmitOrderResult{}, fmt.Errorf(
+				"finalize trade %s: %w", tentative.ID(), err,
+			)
+		}
+		trades = append(trades, confirmed)
+	}
+	confirmedEngine := orders.NewMatchingEngineWithSequence(sequence)
 
 	if err := s.store.Apply(
 		ctx,
@@ -202,7 +243,7 @@ func (s *Service) SubmitOrder(
 			Orders:        changedOrders,
 			Trades:        trades,
 			BookSequences: workingBook.Sequences(),
-			TradeSequence: workingEngine.TradeSequence(),
+			TradeSequence: confirmedEngine.TradeSequence(),
 		},
 	); err != nil {
 		return SubmitOrderResult{}, fmt.Errorf(
@@ -211,18 +252,14 @@ func (s *Service) SubmitOrder(
 		)
 	}
 
-	// Commit the updated existing orders, including orders that were
-	// completely filled and removed from workingBook by matching.
+	// Publish only after durable success. Cloned orders that were filled
+	// and removed from the book are still updated in the registry.
 	for id, updatedOrder := range workingOrders {
 		s.orders[id] = updatedOrder
 	}
-
-	// Register the incoming order, including when fully filled.
 	s.orders[order.ID()] = order
-
-	// Publish the resulting book and trade sequence.
 	s.books[order.Symbol()] = workingBook
-	s.engine = workingEngine
+	s.engine = confirmedEngine
 
 	return SubmitOrderResult{
 		Order:  snapshotOrder(order),
@@ -254,12 +291,27 @@ func (s *Service) CancelOrder(
 	ctx context.Context,
 	id string,
 ) (OrderSnapshot, error) {
+	id = strings.TrimSpace(id)
+
+	// Read the immutable symbol before acquiring its gate; otherwise
+	// cancellation could race with matching on a private working book.
+	s.mu.RLock()
+	order, exists := s.orders[id]
+	if !exists {
+		s.mu.RUnlock()
+		return OrderSnapshot{}, ErrOrderNotFound
+	}
+	symbol := order.Symbol()
+	s.mu.RUnlock()
+
+	gate := s.symbolLock(symbol)
+	gate.Lock()
+	defer gate.Unlock()
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	id = strings.TrimSpace(id)
-
-	order, exists := s.orders[id]
+	order, exists = s.orders[id]
 	if !exists {
 		return OrderSnapshot{}, ErrOrderNotFound
 	}
