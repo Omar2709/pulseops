@@ -116,3 +116,29 @@ trade sequence. Never point TEST_DATABASE_URL to a database containing valuable 
 
 CI collects three samples per scenario. Differences on GitHub-hosted runners are indicative;
 do not interpret them as production capacity or statistically controlled benchmarks.
+
+## Reducing PostgreSQL global sequence-row contention (October 2026)
+
+The trading service now marks non-crossing submissions and cancellations as changes that **do not advance the confirmed trade sequence**.
+The PostgreSQL store skips the `matching_engine_state` UPDATE for those operations, so they can commit without acquiring that shared row lock.
+Matched orders continue to update the global trade sequence in the same transaction as orders and trades. Direct callers of `Store.Apply`
+retain the old behavior unless they explicitly opt in to `SkipTradeSequenceUpdate`. Opting in while inserting trades is rejected.
+
+The benchmark exercises actual PostgreSQL writes with one writer and multiple parallel writers (`testing.B.RunParallel`).
+Each reported value is the mean of three GitHub Actions samples, using a disposable PostgreSQL database and identical fixture.
+
+| Workload | Before | After | Speedup | Approximate operations/s before → after |
+| --- | ---: | ---: | ---: | ---: |
+| Serial writer | 477.6 μs/op | 430.3 μs/op | 1.11× | 2,094 → 2,324 |
+| Concurrent writers | 256.3 μs/op | 176.4 μs/op | 1.45× | 3,901 → 5,670 |
+
+- Baseline: commit `3132c1a`, [CI run 38855287429](https://github.com/Omar2709/pulseops/actions/runs/38855287429).
+- Optimized: commit `c2f343d`, [CI run 38855619401](https://github.com/Omar2709/pulseops/actions/runs/38855619401).
+
+**Interpretation:** Concurrent `ns/op` reflects aggregate throughput per operation, not per-request latency.
+Because GitHub-hosted runners are shared, these figures are directional, not controlled production benchmarks.
+The benchmark directly calls `Store.Apply`, so it isolates the database layer; the trading service still serializes final commits
+under its global mutex, and its real end-to-end TPS may be lower. PostgreSQL has not been load-tested over a remote network.
+
+An integration test holds a PostgreSQL row lock on the trade sequence while submitting and cancelling resting orders.
+It asserts that those operations complete before the lock is released, then verifies the next matched trade correctly persists sequence 1.
