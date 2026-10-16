@@ -115,6 +115,10 @@ func (s *Service) SubmitOrder(
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	if err := ctx.Err(); err != nil {
+		return SubmitOrderResult{}, err
+	}
+
 	at := s.now()
 
 	// Validate and construct the incoming order.
@@ -243,6 +247,10 @@ func (s *Service) CancelOrder(
 ) (OrderSnapshot, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	if err := ctx.Err(); err != nil {
+		return OrderSnapshot{}, err
+	}
 
 	id = strings.TrimSpace(id)
 
