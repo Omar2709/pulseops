@@ -318,9 +318,8 @@ func TestSubmitOrderHTTPRejectsInvalidRequests(
 	}
 }
 
-// TestSubmitOrderHTTPRejectsDuplicateID verifies
-// that submitting the same order ID twice returns
-// HTTP 409 without replacing the existing order.
+// TestSubmitOrderHTTPIdempotentRetryAndConflict verifies that repeating
+// the same order is safe, while changing its immutable attributes conflicts.
 func TestSubmitOrderHTTPIdempotentRetryAndConflict(t *testing.T) {
 	router := NewRouter(trading.NewService())
 
