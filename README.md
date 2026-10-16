@@ -46,7 +46,7 @@ Implemented:
 - Standardized JSON error responses
 - HTTP handler tests using `net/http/httptest`
 - In-memory trading application service
-- Order submission and duplicate ID detection
+- Order submission with idempotent same-ID retries and conflicting-ID detection
 - Order snapshots to prevent external entity mutation
 - Order lookup by ID
 - Current order-state retrieval after matching
@@ -672,12 +672,21 @@ The endpoint supports automatic matching against compatible resting orders withi
 
 Validation includes malformed JSON, unknown fields, invalid domain values, duplicate order IDs, unsupported media types, and oversized request bodies. The request body limit is 16 KiB. Common responses include:
 
-- `201 Created`: accepted order, including its state after the current matching attempt
+- `201 Created`: accepted new order, including its state after the current matching attempt
+- `200 OK`: same order ID and immutable attributes retried; returns the current order snapshot without matching again
 - `400 Bad Request`: malformed JSON or invalid request/domain values
 - `405 Method Not Allowed`: unsupported HTTP method for this route
-- `409 Conflict`: duplicate order ID
+- `409 Conflict`: existing order ID submitted with different symbol, side, price or quantity
 - `413 Request Entity Too Large`: request body exceeds the limit
 - `415 Unsupported Media Type`: request is not sent as `application/json`
+
+### Idempotent order retries
+
+The client-provided `id` also acts as the idempotency identifier for `POST /v1/orders`. Reusing an ID with the same immutable attributes (normalized symbol and side, fixed-point price, and fixed-point quantity) returns `200 OK` with `Idempotency-Replayed: true`. No matching, trade creation, sequence advancement, or persistence write is repeated. New orders return `201 Created`.
+
+A retry returns the **current** order state rather than an exact copy of the original HTTP response: an order might have been partially filled, fully filled, or cancelled since creation. Reusing the ID with different immutable attributes returns `409 Conflict`. Replays are supported across a single-process PostgreSQL restart because the order registry is recovered from durable state; in-memory-only mode loses its registry after restart.
+
+This mechanism does not introduce a separate `Idempotency-Key` header and is not a solution for multi-process order coordination or ambiguous database commit outcomes. Those require additional design before scaling horizontally.
 
 ### Get Order
 
@@ -786,7 +795,7 @@ PulseOps is planned to include:
 - Best bid / best ask market quotes
 - Multi-process matching coordination
 - Evaluation of incremental or otherwise more efficient staging for large order books
-- Idempotency keys
+- Independent idempotency keys (separate from the existing order-ID replay mechanism)
 - Redis
 - Controlled matching-engine concurrency using goroutines and channels
 - Unit and integration tests
@@ -1006,7 +1015,7 @@ Current tests cover behavior including:
 - fixed-point decimal parsing and overflow boundaries
 - HTTP order submission and fixed-point JSON serialization
 - HTTP input validation and expected status codes
-- duplicate order rejection through HTTP
+- safe repeated submissions and conflicting order IDs through HTTP
 - matching across successive HTTP requests
 - order lookup returning the current state after matching
 - order lookup returning 404 for unknown identifiers

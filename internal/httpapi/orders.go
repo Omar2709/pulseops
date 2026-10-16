@@ -190,12 +190,19 @@ func (h *Handler) SubmitOrder(
 		return
 	}
 
-	// Use the shared HTTP representation.
+	// A matching replay returns the current order state without executing
+	// another trade; a different payload with the same ID remains a conflict.
+	status := http.StatusCreated
+	if result.Replayed {
+		status = http.StatusOK
+		w.Header().Set("Idempotency-Replayed", "true")
+	}
+
 	response := orderResponseFromSnapshot(result.Order)
 
 	if err := writeJSON(
 		w,
-		http.StatusCreated,
+		status,
 		response,
 	); err != nil {
 		log.Printf("write order response: %v", err)

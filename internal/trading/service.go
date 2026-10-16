@@ -54,8 +54,9 @@ func snapshotOrder(order *orders.Order) OrderSnapshot {
 }
 
 type SubmitOrderResult struct {
-	Order  OrderSnapshot
-	Trades []*orders.Trade
+	Order    OrderSnapshot
+	Trades   []*orders.Trade
+	Replayed bool
 }
 
 type Service struct {
@@ -130,8 +131,20 @@ func (s *Service) SubmitOrder(
 		return SubmitOrderResult{}, err
 	}
 
-	if _, exists := s.orders[order.ID()]; exists {
-		return SubmitOrderResult{}, ErrDuplicateOrder
+	// The client-supplied order ID is the idempotency identity. Returning
+	// the current snapshot never re-runs matching or writes to the store.
+	if existing, exists := s.orders[order.ID()]; exists {
+		if existing.Symbol() != order.Symbol() ||
+			existing.Side() != order.Side() ||
+			existing.Price() != order.Price() ||
+			existing.Quantity() != order.Quantity() {
+			return SubmitOrderResult{}, ErrDuplicateOrder
+		}
+
+		return SubmitOrderResult{
+			Order:    snapshotOrder(existing),
+			Replayed: true,
+		}, nil
 	}
 
 	if err := order.Open(at); err != nil {
