@@ -487,7 +487,7 @@ If one side is invalid, the engine returns an error without partially filling th
 
 This validates both sides before applying each individual trade. `MatchingEngine.Match()` itself updates the book and orders in place and does not independently roll back an entire batch after a later failure. For application-level order submission, `trading.Service` performs matching on cloned working state and publishes the result only if the complete matching operation succeeds.
 
-`MatchingEngine.Clone()` also copies the current trade-ID sequence. Trade IDs generated in an unsuccessful working match are discarded without advancing the confirmed engine.
+The application service matches using a provisional matching engine. Temporary trade IDs are discarded; a successful commit assigns global IDs only after all matching succeeds, preserving the confirmed sequence without gaps.
 
 ## Current Architecture
 
@@ -618,7 +618,7 @@ matching_engine.go
 
 Tests are colocated with their corresponding HTTP, application-service, and domain components.
 
-For order submission, `trading.Service` locks the shared state, creates a working book with copies of its active orders, and clones the matching engine. It stages the incoming order and runs matching only against these working objects. A matching error discards all working state; success commits updated order references (including fully filled orders removed from the working book), the incoming order, the resulting book, and the advanced engine before releasing the exclusive lock. The book and registry therefore reference the same committed `Order` instances for active orders.
+For order submission, `trading.Service` locks only the affected symbol while cloning its book and running matching on private working orders. Distinct symbols can stage matching concurrently. After staging, the global commit lock allocates definitive trade IDs, persists changes, and atomically publishes updated order references (including fully filled orders removed from the working book), the incoming order, and the confirmed trade sequence. A matching or persistence failure discards provisional work without publishing changes. The book and registry therefore reference the same committed `Order` instances for active orders.
 
 Before publishing a successful submission or cancellation in memory, `trading.Service` sends the resulting order snapshots and trades to its `StateStore`. A store error aborts publication, preserving the previously committed in-memory book, registry, and trade-ID sequence. HTTP request contexts are propagated into this boundary so PostgreSQL work observes cancellation and deadlines.
 
@@ -760,7 +760,7 @@ Responses:
 - `405 Method Not Allowed`: the HTTP method is not supported. The `Allow` header includes `GET`, `HEAD`, and `DELETE` for this order-resource route.
 - `500 Internal Server Error`: an unexpected internal failure occurred.
 
-The application service holds an exclusive `sync.RWMutex` lock during cancellation, preventing concurrent order submission or matching through that service. Cancellation is staged on a working book and persisted before publication. In PostgreSQL mode, a committed cancellation is recovered after a single-process restart.
+Cancellation first takes the affected symbol's mutex, so it cannot race with matching on that same book, then takes the global commit lock to stage, persist, and publish the cancellation. Matching for other symbols can be staged independently. In PostgreSQL mode, a committed cancellation is recovered after a single-process restart.
 
 Runtime state is held in memory; PostgreSQL mode restores its durable state after restart, while in-memory-only mode does not. Authentication and authorization are not implemented, so this API must not be exposed publicly in its current form.
 
@@ -771,10 +771,10 @@ The current matching engine intentionally prioritizes correctness and domain mod
 Current limitations include:
 
 - Runtime matching state is still held in memory, but PostgreSQL mode rebuilds it at startup from durable orders, active-book sequences, and the matching-engine sequence.
-- Matching is sequential.
-- Order submission, matching, and cancellation currently use an exclusive lock; order lookup uses a shared read lock.
+- Matching remains sequential within each symbol; separate symbols can stage matches concurrently.
+- Global trade-ID allocation, durable writes, and publication remain serialized; order lookup uses a shared read lock.
 - The order book is not safe for unsynchronized concurrent access outside the application service.
-- Order submission provides in-memory atomicity for errors returned during matching by using independent working copies of the affected order book, its active orders, and the matching engine.
+- Order submission provides in-memory atomicity for matching errors by using working copies of the affected book and active orders, plus provisional trades that are re-IDed only at commit.
 - The default runtime remains in-memory when DATABASE_URL is unset; only PostgreSQL mode provides durable restart recovery.
 - Each submission clones the active orders of its symbol, which introduces additional memory and processing costs for large order books.
 - Order-book data structures are not optimized for very large books.
