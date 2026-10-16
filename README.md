@@ -57,6 +57,7 @@ Implemented:
 - Reader-writer synchronization using `sync.RWMutex` and per-symbol mutexes
 - Parallel staging of order matching across independent symbols with serialized trade-ID assignment and durable commit
 - In-memory atomic order submission using independent working copies
+- Lightweight non-crossing submission staging that retains unchanged order instances and persists only the new order
 - `OrderBook.Clone()` preserving active order state and original FIFO insertion sequences
 - `MatchingEngine.Clone()` preserving the confirmed trade-ID sequence
 - Deferred publication of updated orders, the order book, and the matching engine after successful matching
@@ -620,7 +621,7 @@ matching_engine.go
 
 Tests are colocated with their corresponding HTTP, application-service, and domain components.
 
-For order submission, `trading.Service` locks only the affected symbol while cloning its book and running matching on private working orders. Distinct symbols can stage matching concurrently. After staging, the global commit lock allocates definitive trade IDs, persists changes, and atomically publishes updated order references (including fully filled orders removed from the working book), the incoming order, and the confirmed trade sequence. A matching or persistence failure discards provisional work without publishing changes. The book and registry therefore reference the same committed `Order` instances for active orders.
+For order submission, `trading.Service` locks only the affected symbol. If the incoming order can cross resting liquidity, it clones the book and existing orders before matching. If it cannot cross, it stages a detached copy of the book's maps while retaining references to **unchanged** existing orders, avoiding deep copies and redundant persistence writes. Distinct symbols can stage work concurrently. After staging, the global commit lock allocates definitive trade IDs, persists changes, and atomically publishes updated order references (including fully filled orders removed from the working book), the incoming order, and the confirmed trade sequence. A matching or persistence failure discards provisional work without publishing changes. The book and registry therefore reference the same committed `Order` instances for active orders.
 
 Before publishing a successful submission or cancellation in memory, `trading.Service` sends the resulting order snapshots and trades to its `StateStore`. A store error aborts publication, preserving the previously committed in-memory book, registry, and trade-ID sequence. HTTP request contexts are propagated into this boundary so PostgreSQL work observes cancellation and deadlines.
 
@@ -778,7 +779,7 @@ Current limitations include:
 - The order book is not safe for unsynchronized concurrent access outside the application service.
 - Order submission provides in-memory atomicity for matching errors by using working copies of the affected book and active orders, plus provisional trades that are re-IDed only at commit.
 - The default runtime remains in-memory when DATABASE_URL is unset; only PostgreSQL mode provides durable restart recovery.
-- Each submission clones the active orders of its symbol, which introduces additional memory and processing costs for large order books.
+- Submissions that may match and order cancellations still clone the active orders of their symbol to preserve rollback; non-crossing submissions only copy the book's maps. Both paths still scale with book depth for large books.
 - Order-book data structures are not optimized for very large books.
 - Trade IDs use an in-memory sequence during execution; PostgreSQL mode persists and restores that sequence, while in-memory-only mode resets it on restart.
 - PostgreSQL recovery is single-process only; cross-process matching coordination is not implemented. Redis integration does not exist yet.
