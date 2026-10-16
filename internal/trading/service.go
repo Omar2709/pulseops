@@ -181,31 +181,55 @@ func (s *Service) SubmitOrder(
 		return SubmitOrderResult{}, err
 	}
 
+	// An order that cannot cross resting liquidity leaves all existing
+	// entities unchanged. Only copy map structure in that case; matching
+	// and cancellation continue to use fully detached Order copies.
+	restingOnly := originalBook == nil ||
+		!originalBook.WouldCross(order.Side(), order.Price())
+
 	var workingBook *orders.OrderBook
 	var workingOrders map[string]*orders.Order
-	if originalBook != nil {
-		// Safe without mu: the symbol gate excludes mutations of this book.
-		workingBook, workingOrders = originalBook.Clone()
-	} else {
+	if originalBook == nil {
 		workingBook = orders.NewOrderBook()
-		workingOrders = make(map[string]*orders.Order)
+	} else if restingOnly {
+		workingBook = originalBook.CloneForResting()
+	} else {
+		workingBook, workingOrders = originalBook.Clone()
 	}
 	if err := workingBook.Add(order); err != nil {
 		return SubmitOrderResult{}, err
 	}
 
-	// This engine is provisional: its temporary IDs are never published.
-	// Global IDs are allocated only after matching succeeds at commit time.
-	provisional, err := orders.NewMatchingEngine().Match(workingBook, at)
-	if err != nil {
-		return SubmitOrderResult{}, err
+	var provisional []*orders.Trade
+	if !restingOnly {
+		// Global IDs are allocated only after the private matching step.
+		provisional, err = orders.NewMatchingEngine().Match(workingBook, at)
+		if err != nil {
+			return SubmitOrderResult{}, err
+		}
 	}
 
-	changedOrders := make([]OrderSnapshot, 0, len(workingOrders)+1)
-	for _, updatedOrder := range workingOrders {
-		changedOrders = append(changedOrders, snapshotOrder(updatedOrder))
+	var changedOrders []OrderSnapshot
+	var bookSequences map[string]uint64
+	if restingOnly {
+		// Persist only the incoming order. Existing snapshots and their
+		// FIFO sequences are already durable and were not changed.
+		sequence, ok := workingBook.SequenceFor(order.ID())
+		if !ok {
+			return SubmitOrderResult{}, fmt.Errorf(
+				"missing sequence for newly staged order %s", order.ID(),
+			)
+		}
+		changedOrders = []OrderSnapshot{snapshotOrder(order)}
+		bookSequences = map[string]uint64{order.ID(): sequence}
+	} else {
+		changedOrders = make([]OrderSnapshot, 0, len(workingOrders)+1)
+		for _, updatedOrder := range workingOrders {
+			changedOrders = append(changedOrders, snapshotOrder(updatedOrder))
+		}
+		changedOrders = append(changedOrders, snapshotOrder(order))
+		bookSequences = workingBook.Sequences()
 	}
-	changedOrders = append(changedOrders, snapshotOrder(order))
 
 	// Commit is globally serialized because trade IDs and durable sequence
 	// are global. The global gate also protects duplicate IDs across symbols.
@@ -249,7 +273,7 @@ func (s *Service) SubmitOrder(
 		StateChange{
 			Orders:        changedOrders,
 			Trades:        trades,
-			BookSequences: workingBook.Sequences(),
+			BookSequences: bookSequences,
 			TradeSequence: confirmedEngine.TradeSequence(),
 		},
 	); err != nil {

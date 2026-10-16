@@ -268,6 +268,54 @@ func (b *OrderBook) bestAsk() (orderBookEntry, bool) {
 	return best, found
 }
 
+// WouldCross reports whether this incoming limit price could match resting
+// liquidity on the opposite side. Matching still uses the full engine path.
+func (b *OrderBook) WouldCross(side Side, price Price) bool {
+	switch side {
+	case SideBuy:
+		best, ok := b.bestAsk()
+		return ok && price >= best.order.Price()
+	case SideSell:
+		best, ok := b.bestBid()
+		return ok && price <= best.order.Price()
+	default:
+		// Unknown sides must never take the non-matching fast path.
+		return true
+	}
+}
+
+// CloneForResting copies only the maps and their sequence metadata. Existing
+// Order pointers are intentionally shared: callers MUST ONLY insert a new
+// non-crossing order and MUST NOT mutate, match, or cancel existing orders in
+// this copy. Use Clone for any operation that may update resting entities.
+func (b *OrderBook) CloneForResting() *OrderBook {
+	cloned := &OrderBook{
+		symbol:       b.symbol,
+		bids:         make(map[string]orderBookEntry, len(b.bids)),
+		asks:         make(map[string]orderBookEntry, len(b.asks)),
+		nextSequence: b.nextSequence,
+	}
+	for id, entry := range b.bids {
+		cloned.bids[id] = entry
+	}
+	for id, entry := range b.asks {
+		cloned.asks[id] = entry
+	}
+	return cloned
+}
+
+// SequenceFor returns the FIFO sequence of one active order without
+// allocating a snapshot of every active sequence.
+func (b *OrderBook) SequenceFor(orderID string) (uint64, bool) {
+	if entry, ok := b.bids[orderID]; ok {
+		return entry.sequence, true
+	}
+	if entry, ok := b.asks[orderID]; ok {
+		return entry.sequence, true
+	}
+	return 0, false
+}
+
 // Sequences returns a detached snapshot of active order insertion sequences.
 func (b *OrderBook) Sequences() map[string]uint64 {
 	sequences := make(
