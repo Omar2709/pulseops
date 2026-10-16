@@ -68,6 +68,7 @@ Implemented:
 - Persistence failures leave in-memory orders, books, and trade-ID sequence unpublished
 - PostgreSQL-backed StateStore using pgx v5
 - Transactional order upserts and trade inserts
+- Non-matching submissions and cancellations avoid unnecessary updates to the global PostgreSQL trade-sequence row while retaining transactional order writes
 - Embedded, tracked PostgreSQL schema migrations
 - Optional PostgreSQL runtime configuration through DATABASE_URL
 - PostgreSQL integration tests in CI

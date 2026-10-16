@@ -94,3 +94,51 @@ These are directional microbenchmarks from separate GitHub Actions CI executions
 `MatchingEngine.Match` scans each side for the best available entry without sorting or allocating a full ordered view. The public `Bids()` and `Asks()` APIs still sort when callers request a complete snapshot. Matching retains **O(n) best-price selection per fill**, so an indexed price-level structure could help deep books.
 
 Non-crossing submissions still copy the active book maps, an **O(n)** step. Crossing submissions and cancellations still deep-clone all active orders. Further optimizations require careful validation of price-time FIFO, partial fills, cancellation, rollback, global trade sequencing and PostgreSQL recovery.
+
+## PostgreSQL transaction baseline
+
+The PostgreSQL-specific benchmark exercises real transactions and commits, not an in-memory store.
+It uses TEST_DATABASE_URL, runs migrations, resets the tables and sequence before each sub-benchmark,
+then inserts unique non-crossing orders through Store.Apply.
+
+Run on an isolated disposable PostgreSQL database:
+
+```bash
+TEST_DATABASE_URL='postgres://...' go test -run '^$' -bench '^BenchmarkPostgresApplyResting$' -benchtime=150ms -count=3 -benchmem ./internal/postgres
+```
+
+Two scenarios are measured: serial (one goroutine) and parallel (testing.B.RunParallel,
+multiple simultaneous writers sharing a pgx pool). This isolates PostgreSQL transaction
+and global sequence-row contention, without measuring HTTP or matching.
+
+**Destructive warning:** this benchmark truncates orders and trades, then resets the global
+trade sequence. Never point TEST_DATABASE_URL to a database containing valuable data.
+
+CI collects three samples per scenario. Differences on GitHub-hosted runners are indicative;
+do not interpret them as production capacity or statistically controlled benchmarks.
+
+## Reducing PostgreSQL global sequence-row contention (October 2026)
+
+The trading service now marks non-crossing submissions and cancellations as changes that **do not advance the confirmed trade sequence**.
+The PostgreSQL store skips the `matching_engine_state` UPDATE for those operations, so they can commit without acquiring that shared row lock.
+Matched orders continue to update the global trade sequence in the same transaction as orders and trades. Direct callers of `Store.Apply`
+retain the old behavior unless they explicitly opt in to `SkipTradeSequenceUpdate`. Opting in while inserting trades is rejected.
+
+The benchmark exercises actual PostgreSQL writes with one writer and multiple parallel writers (`testing.B.RunParallel`).
+Each reported value is the mean of three GitHub Actions samples, using a disposable PostgreSQL database and identical fixture.
+
+| Workload | Before | After | Speedup | Approximate operations/s before → after |
+| --- | ---: | ---: | ---: | ---: |
+| Serial writer | 477.6 μs/op | 430.3 μs/op | 1.11× | 2,094 → 2,324 |
+| Concurrent writers | 256.3 μs/op | 176.4 μs/op | 1.45× | 3,901 → 5,670 |
+
+- Baseline: commit `3132c1a`, [CI run 38855287429](https://github.com/Omar2709/pulseops/actions/runs/38855287429).
+- Optimized: commit `c2f343d`, [CI run 38855619401](https://github.com/Omar2709/pulseops/actions/runs/38855619401).
+
+**Interpretation:** Concurrent `ns/op` reflects aggregate throughput per operation, not per-request latency.
+Because GitHub-hosted runners are shared, these figures are directional, not controlled production benchmarks.
+The benchmark directly calls `Store.Apply`, so it isolates the database layer; the trading service still serializes final commits
+under its global mutex, and its real end-to-end TPS may be lower. PostgreSQL has not been load-tested over a remote network.
+
+An integration test holds a PostgreSQL row lock on the trade sequence while submitting and cancelling resting orders.
+It asserts that those operations complete before the lock is released, then verifies the next matched trade correctly persists sequence 1.
