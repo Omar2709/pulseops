@@ -213,11 +213,11 @@ func TestConcurrentCancelAndSubmitSameSymbolPreserveBook(t *testing.T) {
 		t.Fatalf("getting SELL: %v", err)
 	}
 	book := service.books["BTCUSD"]
-	if sell.Status() == orders.OrderStatusCancelled {
+	if sell.Status == orders.OrderStatusCancelled {
 		if got := len(book.Asks()); got != 0 {
 			t.Errorf("cancelled SELL remains in book: %d asks", got)
 		}
-	} else if sell.Status() != orders.OrderStatusFilled {
-		t.Errorf("unexpected SELL status %s", sell.Status())
+	} else if sell.Status != orders.OrderStatusFilled {
+		t.Errorf("unexpected SELL status %s", sell.Status)
 	}
 }

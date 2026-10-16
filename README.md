@@ -4,7 +4,7 @@ PulseOps is a trading and order-matching backend built with Go.
 
 The project is being developed progressively to explore production-oriented backend engineering concepts including domain modeling, order matching, concurrency, transactional consistency, idempotency, PostgreSQL, Redis, observability, Docker, Kubernetes, and CI/CD.
 
-The current implementation provides an in-memory trading application service, a sequential matching engine, and an HTTP API for submitting, retrieving, and cancelling limit orders. Order submission and cancellation provide persistence-before-publication semantics through a pluggable StateStore. When DATABASE_URL is configured, PostgreSQL stores order snapshots and trades transactionally and rebuilds the order registry, exact active-book FIFO sequences, and matching-engine trade sequence during startup; without it, the service keeps the existing in-memory-only behavior. Submission, matching, and cancellation are serialized using an exclusive lock, while order lookup uses a read lock; controlled concurrent matching will be introduced in a later phase.
+The current implementation provides an in-memory trading application service, a sequential matching engine, and an HTTP API for submitting, retrieving, and cancelling limit orders. Order submission and cancellation provide persistence-before-publication semantics through a pluggable StateStore. When DATABASE_URL is configured, PostgreSQL stores order snapshots and trades transactionally and rebuilds the order registry, exact active-book FIFO sequences, and matching-engine trade sequence during startup; without it, the service keeps the existing in-memory-only behavior. Each symbol uses a dedicated lock for sequential book updates and FIFO ordering, while matching work for different symbols can be staged concurrently. Global trade-ID allocation, PostgreSQL writes, and publication remain serialized through a commit lock; order lookup uses a read lock. This is controlled in-process concurrency, not multi-process coordination.
 
 > PulseOps is an educational trading-system simulation. It is not intended for real-money trading.
 
@@ -54,7 +54,8 @@ Implemented:
 - Injectable application clock
 - In-memory order registry
 - Independent order books per symbol
-- Reader-writer synchronization using `sync.RWMutex`
+- Reader-writer synchronization using `sync.RWMutex` and per-symbol mutexes
+- Parallel staging of order matching across independent symbols with serialized trade-ID assignment and durable commit
 - In-memory atomic order submission using independent working copies
 - `OrderBook.Clone()` preserving active order state and original FIFO insertion sequences
 - `MatchingEngine.Clone()` preserving the confirmed trade-ID sequence
@@ -77,7 +78,7 @@ Implemented:
 - `GET /v1/orders/{id}` endpoint
 - `DELETE /v1/orders/{id}` cancellation endpoint
 - Application-service cancellation of open and partially filled orders
-- Exclusive synchronization of cancellation with matching
+- Per-symbol synchronization of cancellation with matching
 - Retention of cancelled orders and their executed quantities in the order registry
 - HTTP request validation and body size limits
 - HTTP integration tests for order submission and matching
@@ -625,7 +626,7 @@ When `DATABASE_URL` is configured, the PostgreSQL StateStore wraps every StateCh
 
 The in-memory registry and order books remain the runtime source used by GET and matching, but PostgreSQL mode now rebuilds them before the HTTP server starts. Active orders recover their persisted book sequence rather than deriving priority from timestamps, and the matching engine resumes from its durable trade sequence. A committed database change therefore survives a single-process crash and is reflected after restart. Safe multi-process matching is still future work because each process owns an independent in-memory book.
 
-The architecture will continue to evolve with persistence, controlled concurrent matching, Redis, observability, and infrastructure.
+The architecture will continue to evolve with more efficient book staging, Redis, observability, and infrastructure. Global trade-ID allocation and persistence still serialize commits even when different symbols stage matching concurrently.
 
 ## HTTP API
 

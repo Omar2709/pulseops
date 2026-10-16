@@ -140,8 +140,14 @@ func (s *Service) SubmitOrder(
 	ctx context.Context,
 	input SubmitOrderInput,
 ) (SubmitOrderResult, error) {
-	// Normalize/validate before obtaining the symbol gate. The incoming
-	// order is still private and cannot be observed by another request.
+	// Normalize the symbol to select its stable gate. The same symbol
+	// cannot race against cancellation or another submission.
+	symbol := strings.ToUpper(strings.TrimSpace(input.Symbol))
+	gate := s.symbolLock(symbol)
+	gate.Lock()
+	defer gate.Unlock()
+
+	// Work inside the symbol gate, but outside the global commit lock.
 	at := s.now()
 	order, err := orders.NewOrder(
 		input.ID,
@@ -154,10 +160,6 @@ func (s *Service) SubmitOrder(
 	if err != nil {
 		return SubmitOrderResult{}, err
 	}
-
-	gate := s.symbolLock(order.Symbol())
-	gate.Lock()
-	defer gate.Unlock()
 
 	// The gate excludes all mutations of this symbol, including cancels.
 	// Different symbols can change the registry while this book is staged.
