@@ -63,6 +63,7 @@ Implemented:
 - Failed matching leaves the order registry, active book, and confirmed trade-ID sequence unchanged
 - Pluggable `StateStore` persistence boundary for order submission and cancellation
 - Request context propagation from HTTP operations into the persistence boundary
+- Cancelled request checks before matching/replay and cancellation; in-memory state store honors cancelled contexts
 - Persistence failures leave in-memory orders, books, and trade-ID sequence unpublished
 - PostgreSQL-backed StateStore using pgx v5
 - Transactional order upserts and trade inserts
@@ -70,6 +71,7 @@ Implemented:
 - Optional PostgreSQL runtime configuration through DATABASE_URL
 - PostgreSQL integration tests in CI
 - Exact PostgreSQL startup recovery of the order registry
+- Consistent read-only PostgreSQL recovery snapshot using REPEATABLE READ for order and trade state
 - Persisted FIFO book sequences for active orders
 - Durable matching-engine trade sequence recovery
 - Recovery validation through domain lifecycle invariants

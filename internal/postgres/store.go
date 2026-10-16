@@ -265,11 +265,41 @@ func (s *Store) Apply(
 	return nil
 }
 
-// Load reads durable orders, active-book sequences, and trade sequence.
+// Load reads a consistent snapshot of orders, book sequences, and the
+// matching-engine sequence. Both queries must observe the same commit.
 func (s *Store) Load(
 	ctx context.Context,
 ) (trading.RecoveryState, error) {
-	rows, err := s.pool.Query(
+	var state trading.RecoveryState
+
+	err := pgx.BeginTxFunc(
+		ctx,
+		s.pool,
+		pgx.TxOptions{
+			IsoLevel:   pgx.RepeatableRead,
+			AccessMode: pgx.ReadOnly,
+		},
+		func(tx pgx.Tx) error {
+			var err error
+			state, err = loadRecoverySnapshot(ctx, tx)
+			return err
+		},
+	)
+	if err != nil {
+		return trading.RecoveryState{}, fmt.Errorf(
+			"load PostgreSQL recovery snapshot: %w",
+			err,
+		)
+	}
+
+	return state, nil
+}
+
+func loadRecoverySnapshot(
+	ctx context.Context,
+	tx pgx.Tx,
+) (trading.RecoveryState, error) {
+	rows, err := tx.Query(
 		ctx,
 		`
 			SELECT
@@ -427,7 +457,7 @@ func (s *Store) Load(
 
 	var tradeSequence int64
 
-	if err := s.pool.QueryRow(
+	if err := tx.QueryRow(
 		ctx,
 		`
 			SELECT trade_sequence

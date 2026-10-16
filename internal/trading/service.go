@@ -147,6 +147,11 @@ func (s *Service) SubmitOrder(
 	gate.Lock()
 	defer gate.Unlock()
 
+	// A cancelled request must not return a successful replay or stage work.
+	if err := ctx.Err(); err != nil {
+		return SubmitOrderResult{}, err
+	}
+
 	// Work inside the symbol gate, but outside the global commit lock.
 	at := s.now()
 	order, err := orders.NewOrder(
@@ -293,6 +298,10 @@ func (s *Service) CancelOrder(
 	ctx context.Context,
 	id string,
 ) (OrderSnapshot, error) {
+	if err := ctx.Err(); err != nil {
+		return OrderSnapshot{}, err
+	}
+
 	id = strings.TrimSpace(id)
 
 	// Read the immutable symbol before acquiring its gate; otherwise
@@ -312,6 +321,10 @@ func (s *Service) CancelOrder(
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	if err := ctx.Err(); err != nil {
+		return OrderSnapshot{}, err
+	}
 
 	order, exists = s.orders[id]
 	if !exists {

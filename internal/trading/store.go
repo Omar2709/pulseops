@@ -46,8 +46,8 @@ type StateLoader interface {
 type noopStateStore struct{}
 
 func (noopStateStore) Apply(
-	context.Context,
-	StateChange,
+	ctx context.Context,
+	_ StateChange,
 ) error {
-	return nil
+	return ctx.Err()
 }
