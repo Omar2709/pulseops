@@ -94,3 +94,25 @@ These are directional microbenchmarks from separate GitHub Actions CI executions
 `MatchingEngine.Match` scans each side for the best available entry without sorting or allocating a full ordered view. The public `Bids()` and `Asks()` APIs still sort when callers request a complete snapshot. Matching retains **O(n) best-price selection per fill**, so an indexed price-level structure could help deep books.
 
 Non-crossing submissions still copy the active book maps, an **O(n)** step. Crossing submissions and cancellations still deep-clone all active orders. Further optimizations require careful validation of price-time FIFO, partial fills, cancellation, rollback, global trade sequencing and PostgreSQL recovery.
+
+## PostgreSQL transaction baseline
+
+The PostgreSQL-specific benchmark exercises real transactions and commits, not an in-memory store.
+It uses TEST_DATABASE_URL, runs migrations, resets the tables and sequence before each sub-benchmark,
+then inserts unique non-crossing orders through Store.Apply.
+
+Run on an isolated disposable PostgreSQL database:
+
+```bash
+TEST_DATABASE_URL='postgres://...' go test -run '^$' -bench '^BenchmarkPostgresApplyResting$' -benchtime=150ms -count=3 -benchmem ./internal/postgres
+```
+
+Two scenarios are measured: serial (one goroutine) and parallel (testing.B.RunParallel,
+multiple simultaneous writers sharing a pgx pool). This isolates PostgreSQL transaction
+and global sequence-row contention, without measuring HTTP or matching.
+
+**Destructive warning:** this benchmark truncates orders and trades, then resets the global
+trade sequence. Never point TEST_DATABASE_URL to a database containing valuable data.
+
+CI collects three samples per scenario. Differences on GitHub-hosted runners are indicative;
+do not interpret them as production capacity or statistically controlled benchmarks.
