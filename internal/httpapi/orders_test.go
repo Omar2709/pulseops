@@ -318,12 +318,9 @@ func TestSubmitOrderHTTPRejectsInvalidRequests(
 	}
 }
 
-// TestSubmitOrderHTTPRejectsDuplicateID verifies
-// that submitting the same order ID twice returns
-// HTTP 409 without replacing the existing order.
-func TestSubmitOrderHTTPRejectsDuplicateID(
-	t *testing.T,
-) {
+// TestSubmitOrderHTTPIdempotentRetryAndConflict verifies that repeating
+// the same order is safe, while changing its immutable attributes conflicts.
+func TestSubmitOrderHTTPIdempotentRetryAndConflict(t *testing.T) {
 	router := NewRouter(trading.NewService())
 
 	body := `{
@@ -334,66 +331,56 @@ func TestSubmitOrderHTTPRejectsDuplicateID(
 		"quantity": "0.05"
 	}`
 
-	submit := func() *httptest.ResponseRecorder {
+	submit := func(payload string) *httptest.ResponseRecorder {
 		request := httptest.NewRequest(
 			http.MethodPost,
 			"/v1/orders",
-			strings.NewReader(body),
+			strings.NewReader(payload),
 		)
-		request.Header.Set(
-			"Content-Type",
-			"application/json",
-		)
+		request.Header.Set("Content-Type", "application/json")
 
 		recorder := httptest.NewRecorder()
 		router.ServeHTTP(recorder, request)
-
 		return recorder
 	}
 
-	first := submit()
-
+	first := submit(body)
 	if first.Code != http.StatusCreated {
-		t.Fatalf(
-			"expected first request to return 201, got %d: %s",
-			first.Code,
-			first.Body.String(),
-		)
+		t.Fatalf("expected 201 for new order, got %d: %s",
+			first.Code, first.Body.String())
 	}
 
-	second := submit()
-
-	if second.Code != http.StatusConflict {
-		t.Fatalf(
-			"expected duplicate request to return 409, got %d: %s",
-			second.Code,
-			second.Body.String(),
-		)
+	replay := submit(body)
+	if replay.Code != http.StatusOK {
+		t.Fatalf("expected 200 on replay, got %d: %s",
+			replay.Code, replay.Body.String())
+	}
+	if got := replay.Header().Get("Idempotency-Replayed"); got != "true" {
+		t.Errorf("expected replay header, got %q", got)
+	}
+	if replay.Body.String() != first.Body.String() {
+		t.Errorf("expected identical order snapshot on immediate replay,\nfirst: %s\nreplay: %s",
+			first.Body.String(), replay.Body.String())
 	}
 
-	if got := second.Header().Get("Content-Type"); got != "application/json" {
-		t.Errorf(
-			"expected JSON error response, got %q",
-			got,
-		)
+	conflicting := submit(`{
+		"id": "buy-001",
+		"symbol": "BTCUSD",
+		"side": "BUY",
+		"price": "60001.00",
+		"quantity": "0.05"
+	}`)
+	if conflicting.Code != http.StatusConflict {
+		t.Fatalf("expected 409 for reused ID with different payload, got %d: %s",
+			conflicting.Code, conflicting.Body.String())
 	}
 
 	var response errorResponse
-
-	if err := json.NewDecoder(
-		second.Body,
-	).Decode(&response); err != nil {
-		t.Fatalf(
-			"decoding error response: %v",
-			err,
-		)
+	if err := json.NewDecoder(conflicting.Body).Decode(&response); err != nil {
+		t.Fatalf("decoding conflict response: %v", err)
 	}
-
 	if response.Error != "order already exists" {
-		t.Errorf(
-			"unexpected error message: %q",
-			response.Error,
-		)
+		t.Errorf("unexpected conflict error: %q", response.Error)
 	}
 }
 

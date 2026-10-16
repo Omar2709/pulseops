@@ -4,7 +4,7 @@ PulseOps is a trading and order-matching backend built with Go.
 
 The project is being developed progressively to explore production-oriented backend engineering concepts including domain modeling, order matching, concurrency, transactional consistency, idempotency, PostgreSQL, Redis, observability, Docker, Kubernetes, and CI/CD.
 
-The current implementation provides an in-memory trading application service, a sequential matching engine, and an HTTP API for submitting, retrieving, and cancelling limit orders. Order submission and cancellation provide persistence-before-publication semantics through a pluggable StateStore. When DATABASE_URL is configured, PostgreSQL stores order snapshots and trades transactionally and rebuilds the order registry, exact active-book FIFO sequences, and matching-engine trade sequence during startup; without it, the service keeps the existing in-memory-only behavior. Submission, matching, and cancellation are serialized using an exclusive lock, while order lookup uses a read lock; controlled concurrent matching will be introduced in a later phase.
+The current implementation provides an in-memory trading application service, a sequential matching engine, and an HTTP API for submitting, retrieving, and cancelling limit orders. Order submission and cancellation provide persistence-before-publication semantics through a pluggable StateStore. When DATABASE_URL is configured, PostgreSQL stores order snapshots and trades transactionally and rebuilds the order registry, exact active-book FIFO sequences, and matching-engine trade sequence during startup; without it, the service keeps the existing in-memory-only behavior. Each symbol uses a dedicated lock for sequential book updates and FIFO ordering, while matching work for different symbols can be staged concurrently. Global trade-ID allocation, PostgreSQL writes, and publication remain serialized through a commit lock; order lookup uses a read lock. This is controlled in-process concurrency, not multi-process coordination.
 
 > PulseOps is an educational trading-system simulation. It is not intended for real-money trading.
 
@@ -46,7 +46,7 @@ Implemented:
 - Standardized JSON error responses
 - HTTP handler tests using `net/http/httptest`
 - In-memory trading application service
-- Order submission and duplicate ID detection
+- Order submission with idempotent same-ID retries and conflicting-ID detection
 - Order snapshots to prevent external entity mutation
 - Order lookup by ID
 - Current order-state retrieval after matching
@@ -54,7 +54,8 @@ Implemented:
 - Injectable application clock
 - In-memory order registry
 - Independent order books per symbol
-- Reader-writer synchronization using `sync.RWMutex`
+- Reader-writer synchronization using `sync.RWMutex` and per-symbol mutexes
+- Parallel staging of order matching across independent symbols with serialized trade-ID assignment and durable commit
 - In-memory atomic order submission using independent working copies
 - `OrderBook.Clone()` preserving active order state and original FIFO insertion sequences
 - `MatchingEngine.Clone()` preserving the confirmed trade-ID sequence
@@ -62,6 +63,7 @@ Implemented:
 - Failed matching leaves the order registry, active book, and confirmed trade-ID sequence unchanged
 - Pluggable `StateStore` persistence boundary for order submission and cancellation
 - Request context propagation from HTTP operations into the persistence boundary
+- Cancelled request checks before matching/replay and cancellation; in-memory state store honors cancelled contexts
 - Persistence failures leave in-memory orders, books, and trade-ID sequence unpublished
 - PostgreSQL-backed StateStore using pgx v5
 - Transactional order upserts and trade inserts
@@ -69,6 +71,7 @@ Implemented:
 - Optional PostgreSQL runtime configuration through DATABASE_URL
 - PostgreSQL integration tests in CI
 - Exact PostgreSQL startup recovery of the order registry
+- Consistent read-only PostgreSQL recovery snapshot using REPEATABLE READ for order and trade state
 - Persisted FIFO book sequences for active orders
 - Durable matching-engine trade sequence recovery
 - Recovery validation through domain lifecycle invariants
@@ -77,7 +80,7 @@ Implemented:
 - `GET /v1/orders/{id}` endpoint
 - `DELETE /v1/orders/{id}` cancellation endpoint
 - Application-service cancellation of open and partially filled orders
-- Exclusive synchronization of cancellation with matching
+- Per-symbol synchronization of cancellation with matching
 - Retention of cancelled orders and their executed quantities in the order registry
 - HTTP request validation and body size limits
 - HTTP integration tests for order submission and matching
@@ -486,7 +489,7 @@ If one side is invalid, the engine returns an error without partially filling th
 
 This validates both sides before applying each individual trade. `MatchingEngine.Match()` itself updates the book and orders in place and does not independently roll back an entire batch after a later failure. For application-level order submission, `trading.Service` performs matching on cloned working state and publishes the result only if the complete matching operation succeeds.
 
-`MatchingEngine.Clone()` also copies the current trade-ID sequence. Trade IDs generated in an unsuccessful working match are discarded without advancing the confirmed engine.
+The application service matches using a provisional matching engine. Temporary trade IDs are discarded; a successful commit assigns global IDs only after all matching succeeds, preserving the confirmed sequence without gaps.
 
 ## Current Architecture
 
@@ -617,7 +620,7 @@ matching_engine.go
 
 Tests are colocated with their corresponding HTTP, application-service, and domain components.
 
-For order submission, `trading.Service` locks the shared state, creates a working book with copies of its active orders, and clones the matching engine. It stages the incoming order and runs matching only against these working objects. A matching error discards all working state; success commits updated order references (including fully filled orders removed from the working book), the incoming order, the resulting book, and the advanced engine before releasing the exclusive lock. The book and registry therefore reference the same committed `Order` instances for active orders.
+For order submission, `trading.Service` locks only the affected symbol while cloning its book and running matching on private working orders. Distinct symbols can stage matching concurrently. After staging, the global commit lock allocates definitive trade IDs, persists changes, and atomically publishes updated order references (including fully filled orders removed from the working book), the incoming order, and the confirmed trade sequence. A matching or persistence failure discards provisional work without publishing changes. The book and registry therefore reference the same committed `Order` instances for active orders.
 
 Before publishing a successful submission or cancellation in memory, `trading.Service` sends the resulting order snapshots and trades to its `StateStore`. A store error aborts publication, preserving the previously committed in-memory book, registry, and trade-ID sequence. HTTP request contexts are propagated into this boundary so PostgreSQL work observes cancellation and deadlines.
 
@@ -625,7 +628,7 @@ When `DATABASE_URL` is configured, the PostgreSQL StateStore wraps every StateCh
 
 The in-memory registry and order books remain the runtime source used by GET and matching, but PostgreSQL mode now rebuilds them before the HTTP server starts. Active orders recover their persisted book sequence rather than deriving priority from timestamps, and the matching engine resumes from its durable trade sequence. A committed database change therefore survives a single-process crash and is reflected after restart. Safe multi-process matching is still future work because each process owns an independent in-memory book.
 
-The architecture will continue to evolve with persistence, controlled concurrent matching, Redis, observability, and infrastructure.
+The architecture will continue to evolve with more efficient book staging, Redis, observability, and infrastructure. Global trade-ID allocation and persistence still serialize commits even when different symbols stage matching concurrently.
 
 ## HTTP API
 
@@ -672,12 +675,21 @@ The endpoint supports automatic matching against compatible resting orders withi
 
 Validation includes malformed JSON, unknown fields, invalid domain values, duplicate order IDs, unsupported media types, and oversized request bodies. The request body limit is 16 KiB. Common responses include:
 
-- `201 Created`: accepted order, including its state after the current matching attempt
+- `201 Created`: accepted new order, including its state after the current matching attempt
+- `200 OK`: same order ID and immutable attributes retried; returns the current order snapshot without matching again
 - `400 Bad Request`: malformed JSON or invalid request/domain values
 - `405 Method Not Allowed`: unsupported HTTP method for this route
-- `409 Conflict`: duplicate order ID
+- `409 Conflict`: existing order ID submitted with different symbol, side, price or quantity
 - `413 Request Entity Too Large`: request body exceeds the limit
 - `415 Unsupported Media Type`: request is not sent as `application/json`
+
+### Idempotent order retries
+
+The client-provided `id` also acts as the idempotency identifier for `POST /v1/orders`. Reusing an ID with the same immutable attributes (normalized symbol and side, fixed-point price, and fixed-point quantity) returns `200 OK` with `Idempotency-Replayed: true`. No matching, trade creation, sequence advancement, or persistence write is repeated. New orders return `201 Created`.
+
+A retry returns the **current** order state rather than an exact copy of the original HTTP response: an order might have been partially filled, fully filled, or cancelled since creation. Reusing the ID with different immutable attributes returns `409 Conflict`. Replays are supported across a single-process PostgreSQL restart because the order registry is recovered from durable state; in-memory-only mode loses its registry after restart.
+
+This mechanism does not introduce a separate `Idempotency-Key` header and is not a solution for multi-process order coordination or ambiguous database commit outcomes. Those require additional design before scaling horizontally.
 
 ### Get Order
 
@@ -750,7 +762,7 @@ Responses:
 - `405 Method Not Allowed`: the HTTP method is not supported. The `Allow` header includes `GET`, `HEAD`, and `DELETE` for this order-resource route.
 - `500 Internal Server Error`: an unexpected internal failure occurred.
 
-The application service holds an exclusive `sync.RWMutex` lock during cancellation, preventing concurrent order submission or matching through that service. Cancellation is staged on a working book and persisted before publication. In PostgreSQL mode, a committed cancellation is recovered after a single-process restart.
+Cancellation first takes the affected symbol's mutex, so it cannot race with matching on that same book, then takes the global commit lock to stage, persist, and publish the cancellation. Matching for other symbols can be staged independently. In PostgreSQL mode, a committed cancellation is recovered after a single-process restart.
 
 Runtime state is held in memory; PostgreSQL mode restores its durable state after restart, while in-memory-only mode does not. Authentication and authorization are not implemented, so this API must not be exposed publicly in its current form.
 
@@ -761,10 +773,10 @@ The current matching engine intentionally prioritizes correctness and domain mod
 Current limitations include:
 
 - Runtime matching state is still held in memory, but PostgreSQL mode rebuilds it at startup from durable orders, active-book sequences, and the matching-engine sequence.
-- Matching is sequential.
-- Order submission, matching, and cancellation currently use an exclusive lock; order lookup uses a shared read lock.
+- Matching remains sequential within each symbol; separate symbols can stage matches concurrently.
+- Global trade-ID allocation, durable writes, and publication remain serialized; order lookup uses a shared read lock.
 - The order book is not safe for unsynchronized concurrent access outside the application service.
-- Order submission provides in-memory atomicity for errors returned during matching by using independent working copies of the affected order book, its active orders, and the matching engine.
+- Order submission provides in-memory atomicity for matching errors by using working copies of the affected book and active orders, plus provisional trades that are re-IDed only at commit.
 - The default runtime remains in-memory when DATABASE_URL is unset; only PostgreSQL mode provides durable restart recovery.
 - Each submission clones the active orders of its symbol, which introduces additional memory and processing costs for large order books.
 - Order-book data structures are not optimized for very large books.
@@ -786,7 +798,7 @@ PulseOps is planned to include:
 - Best bid / best ask market quotes
 - Multi-process matching coordination
 - Evaluation of incremental or otherwise more efficient staging for large order books
-- Idempotency keys
+- Independent idempotency keys (separate from the existing order-ID replay mechanism)
 - Redis
 - Controlled matching-engine concurrency using goroutines and channels
 - Unit and integration tests
@@ -1006,7 +1018,7 @@ Current tests cover behavior including:
 - fixed-point decimal parsing and overflow boundaries
 - HTTP order submission and fixed-point JSON serialization
 - HTTP input validation and expected status codes
-- duplicate order rejection through HTTP
+- safe repeated submissions and conflicting order IDs through HTTP
 - matching across successive HTTP requests
 - order lookup returning the current state after matching
 - order lookup returning 404 for unknown identifiers
