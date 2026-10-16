@@ -67,8 +67,30 @@ Mean of three samples (lower is better):
 
 CI runners are not performance-isolated, so treat these as directional comparisons, not guarantees or formal statistical significance. The entire benchmark runs **in memory**, excludes fixture cloning from timing, and does not measure HTTP or PostgreSQL throughput.
 
+## Non-crossing order staging optimization (October 2026)
+
+`SubmitOrder` now distinguishes an incoming order that could cross resting liquidity from one that must remain in the book. Crossing submissions still deep-clone the working book and entities to support rollback. **Non-crossing** submissions clone only the map structure, retain existing unchanged order pointers, skip matching, and persist only the new order and its original FIFO sequence. Post-commit publication remains atomic. Cancellations continue using deep clones.
+
+Benchmark command (in-memory `StateStore`, three repetitions):
+
+```bash
+go test -run '^$' -bench '^BenchmarkSubmitOrderBookDepth$/^depth_(100|1000)$' -benchtime=150ms -count=3 -benchmem ./internal/trading
+```
+
+- Baseline commit `e01eaeb`, [CI run 38854235873](https://github.com/Omar2709/pulseops/actions/runs/38854235873).
+- Optimized commit `e6f8b41`, [CI run 38854461423](https://github.com/Omar2709/pulseops/actions/runs/38854461423).
+
+Mean of three samples:
+
+| Resting depth | Before | After | Speedup | Allocated before → after | Allocations before → after |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 100 | 15.69 μs/op | 9.13 μs/op | 1.7× | 42.3 KiB → 5.7 KiB | 121 → 15 |
+| 1,000 | 179.27 μs/op | 58.36 μs/op | 3.1× | 472 KiB → 81 KiB | 1,027 → 17 |
+
+These are directional microbenchmarks from separate GitHub Actions CI executions, not an isolated statistical comparison. Book fixture creation is excluded from measured time, while the submission's map copying and in-memory persistence are included. **This does not measure PostgreSQL TPS**, even though the new path reduces the number of rows upserted for non-crossing submissions.
+
 ## Next optimization hypotheses
 
-`MatchingEngine.Match` now scans each side for the best available entry without sorting and allocating a full ordered view. The public `Bids()` and `Asks()` APIs still sort when callers explicitly request a complete snapshot. Matching retains **O(n) best-price selection per fill**, so an indexed price-level structure could improve deeper books in the future, at the cost of greater update/recovery complexity.
+`MatchingEngine.Match` scans each side for the best available entry without sorting or allocating a full ordered view. The public `Bids()` and `Asks()` APIs still sort when callers request a complete snapshot. Matching retains **O(n) best-price selection per fill**, so an indexed price-level structure could help deep books.
 
-`OrderBook.Clone()` also scales with the number of resting orders and is invoked on every submission. Compare its existing depth benchmarks before pursuing incremental staging or indexed books. Any optimization must keep price-time FIFO, partial fills, cancellation, rollback, global trade sequencing and PostgreSQL recovery fully covered by regression tests.
+Non-crossing submissions still copy the active book maps, an **O(n)** step. Crossing submissions and cancellations still deep-clone all active orders. Further optimizations require careful validation of price-time FIFO, partial fills, cancellation, rollback, global trade sequencing and PostgreSQL recovery.
