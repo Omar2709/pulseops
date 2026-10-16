@@ -67,6 +67,11 @@ jobs:
       - name: Run tests
         run: go test -count=1 ./...
 
+      - name: Smoke test benchmarks
+        run: |
+          go test -run '^$' -bench '^BenchmarkOrderBookTopOfBook$/^depth_100$' -benchtime=1x ./internal/orders
+          go test -run '^$' -bench '^BenchmarkSubmitOrderBookDepth$/^depth_0$' -benchtime=1x ./internal/trading
+
   race:
     name: Race Detector
     runs-on: ubuntu-latest
