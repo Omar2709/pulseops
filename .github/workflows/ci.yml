@@ -72,6 +72,9 @@ jobs:
           go test -run '^$' -bench '^BenchmarkOrderBookTopOfBook$/^depth_100$' -benchtime=1x ./internal/orders
           go test -run '^$' -bench '^BenchmarkSubmitOrderBookDepth$/^depth_0$' -benchtime=1x ./internal/trading
 
+      - name: Measure matching throughput (3 samples)
+        run: go test -run '^$' -bench '^BenchmarkMatchingEngineCrossingBook$' -benchtime=100ms -count=3 -benchmem ./internal/orders
+
   race:
     name: Race Detector
     runs-on: ubuntu-latest

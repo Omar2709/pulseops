@@ -235,6 +235,39 @@ func (b *OrderBook) Asks() []*Order {
 	return orders
 }
 
+// bestBid finds the highest price, breaking ties by original book sequence.
+// Unlike Bids, it scans the map without sorting or allocating slices.
+// The caller must synchronize access to this order book.
+func (b *OrderBook) bestBid() (orderBookEntry, bool) {
+	var best orderBookEntry
+	found := false
+	for _, entry := range b.bids {
+		if !found ||
+			entry.order.Price() > best.order.Price() ||
+			(entry.order.Price() == best.order.Price() && entry.sequence < best.sequence) {
+			best = entry
+			found = true
+		}
+	}
+	return best, found
+}
+
+// bestAsk finds the lowest price, breaking ties by original book sequence.
+// The caller must synchronize access to this order book.
+func (b *OrderBook) bestAsk() (orderBookEntry, bool) {
+	var best orderBookEntry
+	found := false
+	for _, entry := range b.asks {
+		if !found ||
+			entry.order.Price() < best.order.Price() ||
+			(entry.order.Price() == best.order.Price() && entry.sequence < best.sequence) {
+			best = entry
+			found = true
+		}
+	}
+	return best, found
+}
+
 // Sequences returns a detached snapshot of active order insertion sequences.
 func (b *OrderBook) Sequences() map[string]uint64 {
 	sequences := make(

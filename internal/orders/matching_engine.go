@@ -50,15 +50,15 @@ func (e *MatchingEngine) Match(
 	trades := make([]*Trade, 0)
 
 	for {
-		bids := book.Bids()
-		asks := book.Asks()
+		bidEntry, bidExists := book.bestBid()
+		askEntry, askExists := book.bestAsk()
 
-		if len(bids) == 0 || len(asks) == 0 {
+		if !bidExists || !askExists {
 			break
 		}
 
-		bestBid := bids[0]
-		bestAsk := asks[0]
+		bestBid := bidEntry.order
+		bestAsk := askEntry.order
 
 		if bestBid.Price() < bestAsk.Price() {
 			break
@@ -69,9 +69,6 @@ func (e *MatchingEngine) Match(
 		if bestAsk.RemainingQuantity() < quantity {
 			quantity = bestAsk.RemainingQuantity()
 		}
-
-		bidEntry := book.bids[bestBid.ID()]
-		askEntry := book.asks[bestAsk.ID()]
 
 		executionPrice := bestAsk.Price()
 

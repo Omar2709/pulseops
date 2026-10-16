@@ -65,6 +65,44 @@ func BenchmarkOrderBookTopOfBook(b *testing.B) {
 	}
 }
 
+// Measure direct best-price selection used by the matching engine. The
+// sorted-view benchmark above remains as the pre-optimization comparison.
+func BenchmarkOrderBookBestBid(b *testing.B) {
+	for _, depth := range []int{100, 1000, 5000} {
+		b.Run(fmt.Sprintf("depth_%d", depth), func(b *testing.B) {
+			book := benchmarkRestingBook(b, depth, SideBuy)
+			b.ReportAllocs()
+			b.ResetTimer()
+
+			for i := 0; i < b.N; i++ {
+				entry, ok := book.bestBid()
+				if !ok {
+					b.Fatal("nonempty bid book has no best price")
+				}
+				benchmarkOrderSink = entry.order
+			}
+		})
+	}
+}
+
+func BenchmarkOrderBookBestAsk(b *testing.B) {
+	for _, depth := range []int{100, 1000, 5000} {
+		b.Run(fmt.Sprintf("depth_%d", depth), func(b *testing.B) {
+			book := benchmarkRestingBook(b, depth, SideSell)
+			b.ReportAllocs()
+			b.ResetTimer()
+
+			for i := 0; i < b.N; i++ {
+				entry, ok := book.bestAsk()
+				if !ok {
+					b.Fatal("nonempty ask book has no best price")
+				}
+				benchmarkOrderSink = entry.order
+			}
+		})
+	}
+}
+
 // Clone cost matters because every service submission stages its symbol book.
 func BenchmarkOrderBookClone(b *testing.B) {
 	for _, depth := range []int{100, 1000, 5000} {
