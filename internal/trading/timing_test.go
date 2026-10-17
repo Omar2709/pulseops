@@ -129,10 +129,10 @@ func TestTimingObserverConcurrentCalls(t *testing.T) {
 		go func(i int) {
 			defer wg.Done()
 			_, err := service.SubmitOrder(context.Background(), SubmitOrderInput{
-				ID: fmt.Sprintf("buy-%d", i),
-				Symbol: fmt.Sprintf("ASSET%dUSD", i%8),
-				Side: orders.SideBuy,
-				Price: orders.Price(10_000),
+				ID:       fmt.Sprintf("buy-%d", i),
+				Symbol:   fmt.Sprintf("ASSET%dUSD", i%8),
+				Side:     orders.SideBuy,
+				Price:    orders.Price(10_000),
 				Quantity: orders.Quantity(1_000),
 			})
 			if err != nil {
