@@ -142,3 +142,33 @@ under its global mutex, and its real end-to-end TPS may be lower. PostgreSQL has
 
 An integration test holds a PostgreSQL row lock on the trade sequence while submitting and cancelling resting orders.
 It asserts that those operations complete before the lock is released, then verifies the next matched trade correctly persists sequence 1.
+
+## End-to-end trading service with PostgreSQL
+
+Use `BenchmarkTradingServicePostgresMatch` to measure the trading application
+service plus actual PostgreSQL transactions and commits, rather than just
+`Store.Apply`. Each benchmark operation submits a resting SELL followed by a
+crossing BUY and commits **one trade**. It includes in-process per-symbol
+staging, global commit locking, real PostgreSQL writes, and sequence updates.
+HTTP transport, networked clients, and remote-database latency are excluded.
+
+Three cases distinguish serial submissions from parallel submissions that
+target one symbol or eight independent symbols. The `parallel_*` `ns/op`
+values represent amortized throughput per completed SELL/BUY pair,
+not the individual latency of each request. Final trade count and global
+sequence are checked after the measurement.
+
+```bash
+TEST_DATABASE_URL='postgres://...' go test -run '^$' -bench '^BenchmarkTradingServicePostgresMatch$' -benchtime=150ms -count=3 -benchmem ./internal/postgres
+```
+
+**Destructive:** the shared benchmark fixture truncates `orders` and `trades`
+and resets the global trade sequence for every scenario and sample. Only
+run on a disposable PostgreSQL database. The benchmark skips when
+`TEST_DATABASE_URL` is unset.
+
+GitHub Actions collects three samples. Report performance measurements with
+their workflow run and Go/host environment. Use the existing in-memory and
+direct PostgreSQL benchmarks to distinguish matching, persistence, and
+global commit contention; avoid changing the serialization model solely
+based on an unisolated shared-runner benchmark.
