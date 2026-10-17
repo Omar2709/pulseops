@@ -194,3 +194,65 @@ It is **not proof that this is the only bottleneck**; variations between benchma
 Instrument separately (a) per-symbol lock wait, (b) global commit lock wait, (c) PostgreSQL Apply time, and (d) publication time.
 Only then consider allowing nonmatching commits on separate symbols to overlap, and retain global serialization for trade sequence allocation.
 Any concurrency change requires stress and race tests, deterministic recovery tests, and benchmarks measuring durable trade correctness rather than throughput alone.
+
+## Optional service phase instrumentation
+
+Use `trading.NewServiceWithStoreAndTimingObserver(store, observer)` to
+measure the critical stages of each order submission and cancellation.
+The `TimingObserver` is opt-in; the existing constructors remain unchanged.
+
+- `SymbolLockWait`: time spent waiting to acquire the symbol mutex.
+- `GlobalLockWait`: time waiting for the global commit mutex.
+- `StoreApply`: elapsed time executing the StateStore's Apply call, including
+  SQL statements and transaction commit in PostgreSQL mode.
+- `Publication`: time publishing committed state to the order registry,
+  affected book, and global trade sequence in memory.
+
+Observers run synchronously **after all service locks are released**. They
+must be safe for concurrent calls and should aggregate rather than retain
+unbounded per-request events. Any blocking observer adds response latency
+but does not hold service locks. The outcome is `committed`, `replayed`,
+or `rejected`. Operations returning before acquiring the symbol lock,
+such as cancelling a nonexistent order, are not observed.
+
+The PostgreSQL matched-pair benchmark uses an observer and emits
+`symbol_wait_ns/submit`, `global_wait_ns/submit`,
+`store_apply_ns/submit`, and `publication_ns/submit`.
+These values are **averages per SubmitOrder call**; the benchmark's
+`ns/op` measures one SELL+BUY pair. They do not sum to total time because
+validation, matching, state staging, trade allocation and observer overhead
+are outside the four phases. The benchmark measures a local PostgreSQL
+service inside GitHub Actions; it does not estimate production network latency.
+
+```bash
+TEST_DATABASE_URL='postgres://...' go test -run '^$' -bench '^BenchmarkTradingServicePostgresMatch$' -benchtime=150ms -count=3 -benchmem ./internal/postgres
+```
+
+As with the other database benchmarks, the fixture truncates test tables
+and resets the trade counter. Run it only against a disposable database.
+
+### Phase results with actual PostgreSQL (October 17, 2026)
+
+Instrumented [CI run 39080729177](https://github.com/Omar2709/pulseops/actions/runs/39080729177),
+commit `9e1afb9`. Means of three samples in Go benchmark, **per SubmitOrder**:
+
+| Phase | Serial | 8 concurrent symbols |
+| --- | ---: | ---: |
+| Symbol gate wait | 0.081 μs | 0.148 μs |
+| Global commit lock wait | 0.096 μs | 2,527 μs |
+| Store.Apply duration | 1,109 μs | 1,265 μs |
+| State publication | 0.898 μs | 0.940 μs |
+
+These are overlapping observations from concurrent goroutines, so the phase
+averages do **not** add to `ns/op` in parallel benchmarks. The one-symbol
+parallel case has a benchmark-level pair mutex, which intentionally prevents
+interleaving and makes it less useful for measuring commit-lock contention.
+The eight-symbol case exhibits a dramatic increase in wait time on the
+global mutex compared with the serial case, while the symbol wait stays tiny.
+The PostgreSQL `Apply` phase is by far the dominant time **inside the
+globally serialized section** for these short-lived matched pairs.
+
+**Next step:** design a safe commit coordinator or separate durable write
+sequencing. Do not simply unlock around Apply: this could break the global
+trade-ID sequence, order-ID uniqueness across symbols and the invariant
+that memory publishes only successfully committed durable state.

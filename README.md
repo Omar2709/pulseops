@@ -55,6 +55,7 @@ Implemented:
 - In-memory order registry
 - Independent order books per symbol
 - Reader-writer synchronization using `sync.RWMutex` and per-symbol mutexes
+- Optional phase timing observer for lock waits, persistence, and in-memory publication
 - Parallel staging of order matching across independent symbols with serialized trade-ID assignment and durable commit
 - In-memory atomic order submission using independent working copies
 - Lightweight non-crossing submission staging that retains unchanged order instances and persists only the new order

@@ -67,6 +67,7 @@ type Service struct {
 	engine *orders.MatchingEngine
 	store  StateStore
 	now    func() time.Time
+	timing TimingObserver // set during construction; not changed in flight
 
 	// Symbol-specific gates permit matching work on different books to
 	// proceed concurrently while retaining FIFO for each symbol.
@@ -86,6 +87,17 @@ func NewServiceWithStore(store StateStore) *Service {
 		},
 		store,
 	)
+}
+
+// NewServiceWithStoreAndTimingObserver enables optional phase measurement.
+// The observer must support concurrent calls; it runs after service locks release.
+func NewServiceWithStoreAndTimingObserver(
+	store StateStore,
+	observer TimingObserver,
+) *Service {
+	service := NewServiceWithStore(store)
+	service.timing = observer
+	return service
 }
 
 func newService(now func() time.Time) *Service {
@@ -144,8 +156,15 @@ func (s *Service) SubmitOrder(
 	// cannot race against cancellation or another submission.
 	symbol := strings.ToUpper(strings.TrimSpace(input.Symbol))
 	gate := s.symbolLock(symbol)
-	gate.Lock()
-	defer gate.Unlock()
+	enabled := s.timing != nil
+	timing := OperationTiming{Operation: TimingSubmit, Outcome: TimingRejected}
+	timing.SymbolLockWait = lockWithTiming(gate, enabled)
+	defer func() {
+		gate.Unlock()
+		if enabled {
+			s.timing.Observe(timing)
+		}
+	}()
 
 	// A cancelled request must not return a successful replay or stage work.
 	if err := ctx.Err(); err != nil {
@@ -172,6 +191,9 @@ func (s *Service) SubmitOrder(
 	if existing, exists := s.orders[order.ID()]; exists {
 		result, err := replayOrder(existing, order)
 		s.mu.RUnlock()
+		if err == nil {
+			timing.Outcome = TimingReplayed
+		}
 		return result, err
 	}
 	originalBook := s.books[order.Symbol()]
@@ -233,13 +255,17 @@ func (s *Service) SubmitOrder(
 
 	// Commit is globally serialized because trade IDs and durable sequence
 	// are global. The global gate also protects duplicate IDs across symbols.
-	s.mu.Lock()
+	timing.GlobalLockWait = lockWithTiming(&s.mu, enabled)
 	defer s.mu.Unlock()
 
 	// An order with this ID may have committed on another symbol while
 	// the private working book was matching. Discard provisional work.
 	if existing, exists := s.orders[order.ID()]; exists {
-		return replayOrder(existing, order)
+		result, err := replayOrder(existing, order)
+		if err == nil {
+			timing.Outcome = TimingReplayed
+		}
+		return result, err
 	}
 
 	sequence := s.engine.TradeSequence()
@@ -268,7 +294,11 @@ func (s *Service) SubmitOrder(
 	}
 	confirmedEngine := orders.NewMatchingEngineWithSequence(sequence)
 
-	if err := s.store.Apply(
+	applyStarted := time.Time{}
+	if enabled {
+		applyStarted = time.Now()
+	}
+	applyErr := s.store.Apply(
 		ctx,
 		StateChange{
 			Orders:                  changedOrders,
@@ -277,13 +307,21 @@ func (s *Service) SubmitOrder(
 			TradeSequence:           confirmedEngine.TradeSequence(),
 			SkipTradeSequenceUpdate: restingOnly,
 		},
-	); err != nil {
+	)
+	if enabled {
+		timing.StoreApply = time.Since(applyStarted)
+	}
+	if applyErr != nil {
 		return SubmitOrderResult{}, fmt.Errorf(
 			"persist order submission: %w",
-			err,
+			applyErr,
 		)
 	}
 
+	publishStarted := time.Time{}
+	if enabled {
+		publishStarted = time.Now()
+	}
 	// Publish only after durable success. Cloned orders that were filled
 	// and removed from the book are still updated in the registry.
 	for id, updatedOrder := range workingOrders {
@@ -292,6 +330,10 @@ func (s *Service) SubmitOrder(
 	s.orders[order.ID()] = order
 	s.books[order.Symbol()] = workingBook
 	s.engine = confirmedEngine
+	if enabled {
+		timing.Publication = time.Since(publishStarted)
+	}
+	timing.Outcome = TimingCommitted
 
 	return SubmitOrderResult{
 		Order:  snapshotOrder(order),
@@ -341,10 +383,17 @@ func (s *Service) CancelOrder(
 	s.mu.RUnlock()
 
 	gate := s.symbolLock(symbol)
-	gate.Lock()
-	defer gate.Unlock()
+	enabled := s.timing != nil
+	timing := OperationTiming{Operation: TimingCancel, Outcome: TimingRejected}
+	timing.SymbolLockWait = lockWithTiming(gate, enabled)
+	defer func() {
+		gate.Unlock()
+		if enabled {
+			s.timing.Observe(timing)
+		}
+	}()
 
-	s.mu.Lock()
+	timing.GlobalLockWait = lockWithTiming(&s.mu, enabled)
 	defer s.mu.Unlock()
 
 	if err := ctx.Err(); err != nil {
@@ -392,22 +441,38 @@ func (s *Service) CancelOrder(
 
 	cancelled := snapshotOrder(workingOrder)
 
-	if err := s.store.Apply(
+	applyStarted := time.Time{}
+	if enabled {
+		applyStarted = time.Now()
+	}
+	applyErr := s.store.Apply(
 		ctx,
 		StateChange{
 			Orders:                  []OrderSnapshot{cancelled},
 			TradeSequence:           s.engine.TradeSequence(),
 			SkipTradeSequenceUpdate: true,
 		},
-	); err != nil {
+	)
+	if enabled {
+		timing.StoreApply = time.Since(applyStarted)
+	}
+	if applyErr != nil {
 		return OrderSnapshot{}, fmt.Errorf(
 			"persist order cancellation: %w",
-			err,
+			applyErr,
 		)
 	}
 
+	publishStarted := time.Time{}
+	if enabled {
+		publishStarted = time.Now()
+	}
 	s.books[workingOrder.Symbol()] = workingBook
 	s.orders[workingOrder.ID()] = workingOrder
+	if enabled {
+		timing.Publication = time.Since(publishStarted)
+	}
+	timing.Outcome = TimingCommitted
 
 	return cancelled, nil
 }

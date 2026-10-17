@@ -34,7 +34,19 @@ func BenchmarkTradingServicePostgresMatch(b *testing.B) {
 			if err != nil {
 				b.Fatal(err)
 			}
-			service := trading.NewServiceWithStore(store)
+			var total atomic.Int64
+			var symbolWait atomic.Int64
+			var globalWait atomic.Int64
+			var applyTime atomic.Int64
+			var publication atomic.Int64
+			observer := trading.TimingObserverFunc(func(timing trading.OperationTiming) {
+				total.Add(1)
+				symbolWait.Add(int64(timing.SymbolLockWait))
+				globalWait.Add(int64(timing.GlobalLockWait))
+				applyTime.Add(int64(timing.StoreApply))
+				publication.Add(int64(timing.Publication))
+			})
+			service := trading.NewServiceWithStoreAndTimingObserver(store, observer)
 			var nextPair atomic.Uint64
 			// A matched pair must remain adjacent for its symbol. Without
 			// this gate, a BUY could fill another goroutine's SELL, making
@@ -103,6 +115,15 @@ func BenchmarkTradingServicePostgresMatch(b *testing.B) {
 				}
 			}
 			b.StopTimer()
+			// Phase averages are nanoseconds per SubmitOrder, not per
+			// matched SELL+BUY pair. Observer overhead is included in ns/op.
+			if n := total.Load(); n != 0 {
+				divisor := float64(n)
+				b.ReportMetric(float64(symbolWait.Load())/divisor, "symbol_wait_ns/submit")
+				b.ReportMetric(float64(globalWait.Load())/divisor, "global_wait_ns/submit")
+				b.ReportMetric(float64(applyTime.Load())/divisor, "store_apply_ns/submit")
+				b.ReportMetric(float64(publication.Load())/divisor, "publication_ns/submit")
+			}
 
 			// This check is excluded from the measurement. Every pair must
 			// persist exactly one trade with no gaps in the global sequence.
