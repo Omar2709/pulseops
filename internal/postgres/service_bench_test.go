@@ -36,10 +36,17 @@ func BenchmarkTradingServicePostgresMatch(b *testing.B) {
 			}
 			service := trading.NewServiceWithStore(store)
 			var nextPair atomic.Uint64
+			// A matched pair must remain adjacent for its symbol. Without
+			// this gate, a BUY could fill another goroutine's SELL, making
+			// the benchmark workload nondeterministic.
+			pairLocks := make([]sync.Mutex, scenario.symbols)
 
 			submitPair := func() error {
 				pair := nextPair.Add(1)
-				symbol := "ASSET" + strconv.FormatUint((pair-1)%scenario.symbols, 10) + "USD"
+				symbolIndex := (pair - 1) % scenario.symbols
+				pairLocks[symbolIndex].Lock()
+				defer pairLocks[symbolIndex].Unlock()
+				symbol := "ASSET" + strconv.FormatUint(symbolIndex, 10) + "USD"
 				suffix := strconv.FormatUint(pair, 10)
 				sellID := "sell-" + suffix
 				buyID := "buy-" + suffix
