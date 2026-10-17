@@ -172,3 +172,25 @@ their workflow run and Go/host environment. Use the existing in-memory and
 direct PostgreSQL benchmarks to distinguish matching, persistence, and
 global commit contention; avoid changing the serialization model solely
 based on an unisolated shared-runner benchmark.
+
+### First end-to-end PostgreSQL results (October 2026)
+
+Data from commit `614fad7` in [GitHub Actions run 39079884435](https://github.com/Omar2709/pulseops/actions/runs/39079884435).
+Each measured operation is a pair of submissions (one resting SELL, one crossing BUY) that commits exactly one trade via `trading.Service` and `Store.Apply`.
+The measurements include symbol gate contention, book staging, global commit mutex, and two PostgreSQL transactions.
+
+| Scenario | Mean of 3 samples | Approx. completed pairs/s |
+| --- | ---: | ---: |
+| Serial | 2.130 ms/pair | 469 |
+| Parallel, 1 symbol | 2.227 ms/pair | 449 |
+| Parallel, 8 symbols | 2.251 ms/pair | 444 |
+
+**Finding:** More independent symbols did not increase aggregate confirmed-trade throughput in this sample.
+The service still holds a global write lock while assigning trade IDs, persisting the state change, and publishing in-memory state.
+This appears to dominate over independent per-symbol staging for the tested short-lived matched pairs.
+It is **not proof that this is the only bottleneck**; variations between benchmark subtests on shared CI workers are not statistically controlled.
+
+**Next engineering decision:** Before changing global locking, design a commit coordinator that preserves globally unique monotonic trade IDs, persistence-before-publication, rollback, and order-ID uniqueness across symbols.
+Instrument separately (a) per-symbol lock wait, (b) global commit lock wait, (c) PostgreSQL Apply time, and (d) publication time.
+Only then consider allowing nonmatching commits on separate symbols to overlap, and retain global serialization for trade sequence allocation.
+Any concurrency change requires stress and race tests, deterministic recovery tests, and benchmarks measuring durable trade correctness rather than throughput alone.
