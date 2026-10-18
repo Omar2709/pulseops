@@ -91,7 +91,9 @@ func TestRestingOrdersFromDifferentSymbolsPersistConcurrently(t *testing.T) {
 	service := NewServiceWithStore(store)
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer cancel()
-	defer close(store.release)
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(store.release) }) }
+	defer release()
 
 	var wg sync.WaitGroup
 	results := make(chan error, 2)
@@ -112,8 +114,7 @@ func TestRestingOrdersFromDifferentSymbolsPersistConcurrently(t *testing.T) {
 	if first == second {
 		t.Fatalf("expected distinct resting orders, received %s twice", first)
 	}
-	close(store.release)
-	store.release = nil
+	release()
 	wg.Wait()
 	close(results)
 	for err := range results {
@@ -139,7 +140,9 @@ func TestConcurrentRestingOrderReservationRejectsCrossSymbolID(t *testing.T) {
 	service := NewServiceWithStore(store)
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer cancel()
-	defer close(store.release)
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(store.release) }) }
+	defer release()
 
 	firstResult := make(chan error, 1)
 	go func() {
@@ -163,8 +166,7 @@ func TestConcurrentRestingOrderReservationRejectsCrossSymbolID(t *testing.T) {
 		t.Fatal("duplicate ID submission waited for unrelated durable write")
 	}
 
-	close(store.release)
-	store.release = nil
+	release()
 	if err := <-firstResult; err != nil {
 		t.Fatalf("committing reserved order: %v", err)
 	}
@@ -186,7 +188,9 @@ func TestFailedConcurrentRestingWriteReleasesOrderID(t *testing.T) {
 	service := NewServiceWithStore(store)
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer cancel()
-	defer close(store.release)
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(store.release) }) }
+	defer release()
 
 	firstResult := make(chan error, 1)
 	go func() {
@@ -194,8 +198,7 @@ func TestFailedConcurrentRestingWriteReleasesOrderID(t *testing.T) {
 		firstResult <- err
 	}()
 	awaitRestingSignal(t, store.entered)
-	close(store.release)
-	store.release = nil
+	release()
 
 	if err := <-firstResult; !errors.Is(err, storageError) {
 		t.Fatalf("expected storage error, got %v", err)
@@ -240,7 +243,9 @@ func TestDelayedRestingCommitNeverResetsConcurrentTradeSequence(t *testing.T) {
 	service := NewServiceWithStore(store)
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer cancel()
-	defer close(store.release)
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(store.release) }) }
+	defer release()
 
 	restingDone := make(chan error, 1)
 	go func() {
@@ -274,8 +279,7 @@ func TestDelayedRestingCommitNeverResetsConcurrentTradeSequence(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("matched order blocked behind unrelated resting persistence")
 	}
-	close(store.release)
-	store.release = nil
+	release()
 	if err := <-restingDone; err != nil {
 		t.Fatalf("delayed resting write: %v", err)
 	}
