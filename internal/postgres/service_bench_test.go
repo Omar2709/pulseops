@@ -148,3 +148,107 @@ func BenchmarkTradingServicePostgresMatch(b *testing.B) {
 		})
 	}
 }
+
+// BenchmarkTradingServicePostgresResting measures durable non-crossing order
+// submissions across independent symbols. Live book depth grows with b.N:
+// this is a throughput workload, not a constant-depth microbenchmark.
+func BenchmarkTradingServicePostgresResting(b *testing.B) {
+	scenarios := []struct {
+		name     string
+		symbols  uint64
+		parallel bool
+	}{
+		{name: "serial", symbols: 1},
+		{name: "parallel_1_symbol", symbols: 1, parallel: true},
+		{name: "parallel_8_symbols", symbols: 8, parallel: true},
+	}
+
+	for _, scenario := range scenarios {
+		b.Run(scenario.name, func(b *testing.B) {
+			pool := benchmarkPostgresPool(b)
+			store, err := NewStore(pool)
+			if err != nil {
+				b.Fatal(err)
+			}
+
+			var total atomic.Int64
+			var globalWait atomic.Int64
+			var applyTime atomic.Int64
+			observer := trading.TimingObserverFunc(func(timing trading.OperationTiming) {
+				total.Add(1)
+				globalWait.Add(int64(timing.GlobalLockWait))
+				applyTime.Add(int64(timing.StoreApply))
+			})
+			service := trading.NewServiceWithStoreAndTimingObserver(store, observer)
+			var nextID atomic.Uint64
+			submit := func() error {
+				n := nextID.Add(1)
+				symbol := "ASSET" + strconv.FormatUint((n-1)%scenario.symbols, 10) + "USD"
+				id := "resting-" + strconv.FormatUint(n, 10)
+				result, err := service.SubmitOrder(context.Background(), trading.SubmitOrderInput{
+					ID:       id,
+					Symbol:   symbol,
+					Side:     orders.SideBuy,
+					Price:    orders.Price(10_000),
+					Quantity: orders.Quantity(1_000),
+				})
+				if err != nil {
+					return err
+				}
+				if result.Replayed || len(result.Trades) != 0 {
+					return fmt.Errorf("resting submission %s unexpectedly matched or replayed", id)
+				}
+				return nil
+			}
+
+			b.ReportAllocs()
+			b.ResetTimer()
+			if scenario.parallel {
+				var once sync.Once
+				var firstErr error
+				b.RunParallel(func(pb *testing.PB) {
+					for pb.Next() {
+						if err := submit(); err != nil {
+							once.Do(func() { firstErr = err })
+						}
+					}
+				})
+				if firstErr != nil {
+					b.Fatalf("parallel resting submission: %v", firstErr)
+				}
+			} else {
+				for i := 0; i < b.N; i++ {
+					if err := submit(); err != nil {
+						b.Fatalf("serial resting submission: %v", err)
+					}
+				}
+			}
+			b.StopTimer()
+			if count := total.Load(); count != 0 {
+				b.ReportMetric(float64(globalWait.Load())/float64(count), "global_wait_ns/submit")
+				b.ReportMetric(float64(applyTime.Load())/float64(count), "store_apply_ns/submit")
+			}
+
+			// Exclude verification from timing; each submission must
+			// persist one order without advancing the trade counter.
+			var count int
+			if err := pool.QueryRow(context.Background(),
+				"SELECT COUNT(*) FROM orders",
+			).Scan(&count); err != nil {
+				b.Fatal(err)
+			}
+			if count != b.N {
+				b.Fatalf("expected %d durable resting orders, got %d", b.N, count)
+			}
+			var tradeSequence int64
+			if err := pool.QueryRow(context.Background(),
+				"SELECT trade_sequence FROM matching_engine_state WHERE id = 1",
+			).Scan(&tradeSequence); err != nil {
+				b.Fatal(err)
+			}
+			if tradeSequence != 0 {
+				b.Fatalf("resting submissions advanced trade sequence to %d", tradeSequence)
+			}
+		})
+	}
+}
