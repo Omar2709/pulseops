@@ -69,6 +69,10 @@ type Service struct {
 	now    func() time.Time
 	timing TimingObserver // set during construction; not changed in flight
 
+	// pendingOrderIDs reserves IDs for non-crossing orders while durable
+	// writes run outside mu. It prevents duplicate IDs across symbols.
+	pendingOrderIDs map[string]struct{}
+
 	// Symbol-specific gates permit matching work on different books to
 	// proceed concurrently while retaining FIFO for each symbol.
 	symbolLocks sync.Map // map[string]*sync.Mutex
@@ -116,11 +120,12 @@ func newServiceWithStore(
 	}
 
 	return &Service{
-		books:  make(map[string]*orders.OrderBook),
-		orders: make(map[string]*orders.Order),
-		engine: orders.NewMatchingEngine(),
-		store:  store,
-		now:    now,
+		books:           make(map[string]*orders.OrderBook),
+		orders:          make(map[string]*orders.Order),
+		pendingOrderIDs: make(map[string]struct{}),
+		engine:          orders.NewMatchingEngine(),
+		store:           store,
+		now:             now,
 	}
 }
 
@@ -145,9 +150,82 @@ func replayOrder(existing, incoming *orders.Order) (SubmitOrderResult, error) {
 	}, nil
 }
 
-// SubmitOrder builds a private working book under a per-symbol gate, then
-// assigns global trade IDs and persists under the service's commit lock.
-// Different symbols can match concurrently without duplicating trade IDs.
+// persistRestingOrder permits independent non-crossing orders to persist
+// concurrently without holding the global commit mutex across database I/O.
+// The per-symbol gate is held by the caller throughout staging and commit.
+// The global mutex only reserves the order ID and publishes durable state.
+func (s *Service) persistRestingOrder(
+	ctx context.Context,
+	order *orders.Order,
+	workingBook *orders.OrderBook,
+	changedOrders []OrderSnapshot,
+	bookSequences map[string]uint64,
+	timing *OperationTiming,
+) (SubmitOrderResult, error) {
+	enabled := s.timing != nil
+	timing.GlobalLockWait += lockWithTiming(&s.mu, enabled)
+	if existing, exists := s.orders[order.ID()]; exists {
+		result, err := replayOrder(existing, order)
+		s.mu.Unlock()
+		if err == nil {
+			timing.Outcome = TimingReplayed
+		}
+		return result, err
+	}
+	if _, reserved := s.pendingOrderIDs[order.ID()]; reserved {
+		s.mu.Unlock()
+		return SubmitOrderResult{}, ErrDuplicateOrder
+	}
+
+	s.pendingOrderIDs[order.ID()] = struct{}{}
+	sequence := s.engine.TradeSequence()
+	s.mu.Unlock()
+
+	applyStarted := time.Time{}
+	if enabled {
+		applyStarted = time.Now()
+	}
+	applyErr := s.store.Apply(ctx, StateChange{
+		Orders:                  changedOrders,
+		BookSequences:           bookSequences,
+		TradeSequence:           sequence,
+		SkipTradeSequenceUpdate: true,
+	})
+	if enabled {
+		timing.StoreApply = time.Since(applyStarted)
+	}
+
+	// Always release the global ID reservation, including failed writes.
+	// No other symbol can commit an order using the same ID while reserved.
+	timing.GlobalLockWait += lockWithTiming(&s.mu, enabled)
+	delete(s.pendingOrderIDs, order.ID())
+	if applyErr != nil {
+		s.mu.Unlock()
+		return SubmitOrderResult{}, fmt.Errorf(
+			"persist order submission: %w", applyErr,
+		)
+	}
+
+	publishStarted := time.Time{}
+	if enabled {
+		publishStarted = time.Now()
+	}
+	s.orders[order.ID()] = order
+	s.books[order.Symbol()] = workingBook
+	// Do not overwrite s.engine: a different symbol may have confirmed a
+	// trade while this non-crossing transaction was in progress.
+	if enabled {
+		timing.Publication = time.Since(publishStarted)
+	}
+	s.mu.Unlock()
+	timing.Outcome = TimingCommitted
+
+	return SubmitOrderResult{Order: snapshotOrder(order)}, nil
+}
+
+// SubmitOrder prepares private book state under a per-symbol gate.
+// Crossed trades still use the global mutex for ID allocation, persistence,
+// and publication; non-crossing orders reserve IDs and persist concurrently.
 func (s *Service) SubmitOrder(
 	ctx context.Context,
 	input SubmitOrderInput,
@@ -253,8 +331,16 @@ func (s *Service) SubmitOrder(
 		bookSequences = workingBook.Sequences()
 	}
 
-	// Commit is globally serialized because trade IDs and durable sequence
-	// are global. The global gate also protects duplicate IDs across symbols.
+	// No trades are possible on a resting-only submission: its durable
+	// insert can run without holding mu across PostgreSQL I/O.
+	if restingOnly {
+		return s.persistRestingOrder(
+			ctx, order, workingBook, changedOrders, bookSequences, &timing,
+		)
+	}
+
+	// Matching commits remain globally serialized so trade IDs, durable
+	// sequence and memory publication cannot diverge.
 	timing.GlobalLockWait = lockWithTiming(&s.mu, enabled)
 	defer s.mu.Unlock()
 
@@ -266,6 +352,9 @@ func (s *Service) SubmitOrder(
 			timing.Outcome = TimingReplayed
 		}
 		return result, err
+	}
+	if _, reserved := s.pendingOrderIDs[order.ID()]; reserved {
+		return SubmitOrderResult{}, ErrDuplicateOrder
 	}
 
 	sequence := s.engine.TradeSequence()
