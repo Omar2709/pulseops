@@ -256,3 +256,58 @@ globally serialized section** for these short-lived matched pairs.
 sequencing. Do not simply unlock around Apply: this could break the global
 trade-ID sequence, order-ID uniqueness across symbols and the invariant
 that memory publishes only successfully committed durable state.
+
+## Parallel durable commits for independent non-crossing orders (October 2026)
+
+After the phase instrumentation showed high global mutex wait under eight concurrent symbols,
+the service now removes the global lock from `StateStore.Apply` **only for a non-crossing
+order**. Each affected symbol still holds its own mutex throughout staging and commit.
+Global order-ID reservations (`pendingOrderIDs`, under `s.mu`) prevent duplicate IDs
+on different symbols while persistence is in progress. Reservations are cleared after
+success or error. The commit is published under `s.mu` after persistence succeeds.
+
+Matched-trade submissions and cancellations retain their existing globally serialized
+commit paths; a delayed resting-order publication never replaces an engine sequence
+advanced by another symbol. This is **single-process** coordination and does not
+enable horizontally scaled independent matching processes.
+
+### PostgreSQL benchmark comparison
+
+The same `BenchmarkTradingServicePostgresResting` was run against the previous
+globally serialized implementation and the optimized implementation, using
+three samples per scenario in disposable PostgreSQL services on GitHub Actions.
+Each `ns/op` is the amortized time for one durable, non-crossing submission.
+
+| Scenario | Before, median of 3 | After, median of 3 | Ratio |
+| --- | ---: | ---: | ---: |
+| Serial | 776.6 μs/op | 386.7 μs/op | ~2.0× |
+| Parallel, 1 symbol | 750.7 μs/op | 396.1 μs/op | ~1.9× |
+| Parallel, 8 symbols | 771.5 μs/op | 142.9 μs/op | ~5.4× |
+
+- Previous code + benchmark: commit `736f0c2`, [CI run 39164823832](https://github.com/Omar2709/pulseops/actions/runs/39164823832).
+- New parallel resting writes: commit `2889681`, [CI run 39164709166](https://github.com/Omar2709/pulseops/actions/runs/39164709166).
+
+In the eight-symbol sample the global-mutex wait reported by the timing observer
+fell from a median ~1.53 ms/submit to ~0.45 μs/submit. One baseline sample
+experienced a large slowdown (~2.99 ms/op), so **medians are reported** rather
+than an outlier-skewed average. CI runners are shared, and even the serial
+comparison varies considerably; treat these results as directional, not as
+statistically controlled speedups or production throughput commitments.
+
+Book depth grows with the number of submissions, and tests exclude fixture
+setup from the measured interval. HTTP traffic and remote PostgreSQL latency
+are not measured. The benchmark validates committed order count and ensures
+the trade sequence remains unchanged; separate integration tests exercise
+concurrent trade commits and recovery across delayed resting publications.
+
+### Correctness boundaries
+
+- `pendingOrderIDs` rejects a conflicting same-ID submission on a different
+  symbol while the original durable write remains pending.
+- Replays on the **same** symbol still wait for its symbol mutex and return
+  the committed current snapshot after successful publication.
+- Persistence failures release ID reservations and do not publish the order.
+- A running non-crossing commit can overlap a trade commit for a different
+  symbol; the trade sequence remains durable and monotonic.
+- Cancellation and matching retain their global commit lock; this change
+  does not optimize their serial persistence path.

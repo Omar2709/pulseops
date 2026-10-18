@@ -84,6 +84,9 @@ jobs:
       - name: Measure end-to-end PostgreSQL matching (3 samples)
         run: go test -run '^$' -bench '^BenchmarkTradingServicePostgresMatch$' -benchtime=150ms -count=3 -benchmem ./internal/postgres
 
+      - name: Measure resting submissions with PostgreSQL (3 samples)
+        run: go test -run '^$' -bench '^BenchmarkTradingServicePostgresResting$' -benchtime=100ms -count=3 -benchmem ./internal/postgres
+
   race:
     name: Race Detector
     runs-on: ubuntu-latest
