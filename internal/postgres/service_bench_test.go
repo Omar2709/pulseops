@@ -252,3 +252,106 @@ func BenchmarkTradingServicePostgresResting(b *testing.B) {
 		})
 	}
 }
+
+
+// BenchmarkTradingServicePostgresCancel measures submit+cancel pairs on a
+// real PostgreSQL store. Matching is excluded; every order remains resting
+// until cancellation. The benchmark checks all rows were durably cancelled.
+func BenchmarkTradingServicePostgresCancel(b *testing.B) {
+	for _, scenario := range []struct {
+		name     string
+		symbols  uint64
+		parallel bool
+	}{
+		{name: "serial", symbols: 1},
+		{name: "parallel_1_symbol", symbols: 1, parallel: true},
+		{name: "parallel_8_symbols", symbols: 8, parallel: true},
+	} {
+		b.Run(scenario.name, func(b *testing.B) {
+			pool := benchmarkPostgresPool(b)
+			store, err := NewStore(pool)
+			if err != nil {
+				b.Fatal(err)
+			}
+			var observed atomic.Int64
+			var globalWait atomic.Int64
+			var applyTime atomic.Int64
+			observer := trading.TimingObserverFunc(func(timing trading.OperationTiming) {
+				if timing.Operation != trading.TimingCancel {
+					return
+				}
+				observed.Add(1)
+				globalWait.Add(int64(timing.GlobalLockWait))
+				applyTime.Add(int64(timing.StoreApply))
+			})
+			service := trading.NewServiceWithStoreAndTimingObserver(store, observer)
+			var nextID atomic.Uint64
+			submitAndCancel := func() error {
+				n := nextID.Add(1)
+				id := "cancellable-" + strconv.FormatUint(n, 10)
+				symbol := "ASSET" + strconv.FormatUint((n-1)%scenario.symbols, 10) + "USD"
+				_, err := service.SubmitOrder(context.Background(), trading.SubmitOrderInput{
+					ID:       id,
+					Symbol:   symbol,
+					Side:     orders.SideBuy,
+					Price:    orders.Price(10_000),
+					Quantity: orders.Quantity(1_000),
+				})
+				if err != nil {
+					return fmt.Errorf("submit %s: %w", id, err)
+				}
+				cancelled, err := service.CancelOrder(context.Background(), id)
+				if err != nil {
+					return fmt.Errorf("cancel %s: %w", id, err)
+				}
+				if cancelled.Status != orders.OrderStatusCancelled {
+					return fmt.Errorf("cancel %s: got %s", id, cancelled.Status)
+				}
+				return nil
+			}
+
+			b.ReportAllocs()
+			b.ResetTimer()
+			if scenario.parallel {
+				var once sync.Once
+				var firstErr error
+				b.RunParallel(func(pb *testing.PB) {
+					for pb.Next() {
+						if err := submitAndCancel(); err != nil {
+							once.Do(func() { firstErr = err })
+						}
+					}
+				})
+				if firstErr != nil {
+					b.Fatalf("parallel submissions and cancellations: %v", firstErr)
+				}
+			} else {
+				for i := 0; i < b.N; i++ {
+					if err := submitAndCancel(); err != nil {
+						b.Fatalf("submissions and cancellations: %v", err)
+					}
+				}
+			}
+			b.StopTimer()
+			if n := observed.Load(); n != 0 {
+				b.ReportMetric(float64(globalWait.Load())/float64(n), "cancel_global_wait_ns/op")
+				b.ReportMetric(float64(applyTime.Load())/float64(n), "cancel_store_apply_ns/op")
+			}
+			var total, cancelled, trades int
+			if err := pool.QueryRow(context.Background(),
+				"SELECT COUNT(*), COUNT(*) FILTER (WHERE status = 'CANCELLED') FROM orders",
+			).Scan(&total, &cancelled); err != nil {
+				b.Fatal(err)
+			}
+			if err := pool.QueryRow(context.Background(),
+				"SELECT COUNT(*) FROM trades",
+			).Scan(&trades); err != nil {
+				b.Fatal(err)
+			}
+			if total != b.N || cancelled != b.N || trades != 0 {
+				b.Fatalf("expected %d cancelled, 0 trades: total=%d cancelled=%d trades=%d",
+					b.N, total, cancelled, trades)
+			}
+		})
+	}
+}
