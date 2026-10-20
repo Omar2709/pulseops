@@ -69,8 +69,13 @@ type Service struct {
 	now    func() time.Time
 	timing TimingObserver // set during construction; not changed in flight
 
-	// pendingOrderIDs reserves IDs for non-crossing orders while durable
-	// writes run outside mu. It prevents duplicate IDs across symbols.
+	// tradeCommitMu serializes trade-ID allocation, durable writes and
+	// publication, without holding mu during PostgreSQL I/O. Only the
+	// coordinator may advance the in-memory global trade sequence.
+	tradeCommitMu sync.Mutex
+
+	// pendingOrderIDs reserves IDs while writes run outside mu, for both
+	// resting and matched orders. IDs stay unique across symbols.
 	pendingOrderIDs map[string]struct{}
 
 	// Symbol-specific gates permit matching work on different books to
@@ -223,9 +228,131 @@ func (s *Service) persistRestingOrder(
 	return SubmitOrderResult{Order: snapshotOrder(order)}, nil
 }
 
+// persistMatchedOrder serializes trade commits through a dedicated lock.
+// The symbol gate is held by the caller, so that book cannot change while
+// its private working state is persisted. Other symbols may still publish
+// non-crossing orders or cancellations, and GetOrder remains responsive.
+func (s *Service) persistMatchedOrder(
+	ctx context.Context,
+	order *orders.Order,
+	workingBook *orders.OrderBook,
+	workingOrders map[string]*orders.Order,
+	changedOrders []OrderSnapshot,
+	bookSequences map[string]uint64,
+	provisional []*orders.Trade,
+	timing *OperationTiming,
+) (SubmitOrderResult, error) {
+	enabled := s.timing != nil
+
+	// Only one trade-producing transaction can reserve the next sequence.
+	// Holding this lock across Apply avoids gaps and out-of-order durable
+	// commits even when a prior transaction fails or is cancelled.
+	timing.GlobalLockWait += lockWithTiming(&s.tradeCommitMu, enabled)
+	defer s.tradeCommitMu.Unlock()
+
+	timing.GlobalLockWait += lockWithTiming(&s.mu, enabled)
+	if existing, exists := s.orders[order.ID()]; exists {
+		result, err := replayOrder(existing, order)
+		s.mu.Unlock()
+		if err == nil {
+			timing.Outcome = TimingReplayed
+		}
+		return result, err
+	}
+	if _, reserved := s.pendingOrderIDs[order.ID()]; reserved {
+		s.mu.Unlock()
+		return SubmitOrderResult{}, ErrDuplicateOrder
+	}
+	s.pendingOrderIDs[order.ID()] = struct{}{}
+	sequence := s.engine.TradeSequence()
+	s.mu.Unlock()
+
+	// Unsuccessful finalization or persistence must release the ID without
+	// publishing any order or consuming the confirmed trade sequence.
+	reserved := true
+	defer func() {
+		if reserved {
+			timing.GlobalLockWait += lockWithTiming(&s.mu, enabled)
+			delete(s.pendingOrderIDs, order.ID())
+			s.mu.Unlock()
+		}
+	}()
+
+	if uint64(len(provisional)) > ^uint64(0)-sequence {
+		return SubmitOrderResult{}, fmt.Errorf("trade sequence exhausted")
+	}
+
+	trades := make([]*orders.Trade, 0, len(provisional))
+	for _, tentative := range provisional {
+		sequence++
+		confirmed, err := orders.NewTrade(
+			fmt.Sprintf("trade-%06d", sequence),
+			tentative.Symbol(),
+			tentative.BuyOrderID(),
+			tentative.SellOrderID(),
+			tentative.Price(),
+			tentative.Quantity(),
+			tentative.ExecutedAt(),
+		)
+		if err != nil {
+			return SubmitOrderResult{}, fmt.Errorf(
+				"finalize trade %s: %w", tentative.ID(), err,
+			)
+		}
+		trades = append(trades, confirmed)
+	}
+	confirmedEngine := orders.NewMatchingEngineWithSequence(sequence)
+
+	applyStarted := time.Time{}
+	if enabled {
+		applyStarted = time.Now()
+	}
+	applyErr := s.store.Apply(ctx, StateChange{
+		Orders:                  changedOrders,
+		Trades:                  trades,
+		BookSequences:           bookSequences,
+		TradeSequence:           confirmedEngine.TradeSequence(),
+		SkipTradeSequenceUpdate: false,
+	})
+	if enabled {
+		timing.StoreApply = time.Since(applyStarted)
+	}
+	if applyErr != nil {
+		return SubmitOrderResult{}, fmt.Errorf(
+			"persist order submission: %w", applyErr,
+		)
+	}
+
+	// Publish the durable book and the sequence as a single registry
+	// transaction. Release the ID reservation under that same lock.
+	timing.GlobalLockWait += lockWithTiming(&s.mu, enabled)
+	publishStarted := time.Time{}
+	if enabled {
+		publishStarted = time.Now()
+	}
+	for id, updated := range workingOrders {
+		s.orders[id] = updated
+	}
+	s.orders[order.ID()] = order
+	s.books[order.Symbol()] = workingBook
+	s.engine = confirmedEngine
+	delete(s.pendingOrderIDs, order.ID())
+	reserved = false
+	if enabled {
+		timing.Publication = time.Since(publishStarted)
+	}
+	s.mu.Unlock()
+	timing.Outcome = TimingCommitted
+
+	return SubmitOrderResult{
+		Order:  snapshotOrder(order),
+		Trades: trades,
+	}, nil
+}
+
 // SubmitOrder prepares private book state under a per-symbol gate.
-// Crossed trades still use the global mutex for ID allocation, persistence,
-// and publication; non-crossing orders reserve IDs and persist concurrently.
+// Trade-producing commits use a dedicated sequencer; non-crossing orders
+// reserve IDs and commit independently of the sequencer.
 func (s *Service) SubmitOrder(
 	ctx context.Context,
 	input SubmitOrderInput,
@@ -339,95 +466,12 @@ func (s *Service) SubmitOrder(
 		)
 	}
 
-	// Matching commits remain globally serialized so trade IDs, durable
-	// sequence and memory publication cannot diverge.
-	timing.GlobalLockWait = lockWithTiming(&s.mu, enabled)
-	defer s.mu.Unlock()
-
-	// An order with this ID may have committed on another symbol while
-	// the private working book was matching. Discard provisional work.
-	if existing, exists := s.orders[order.ID()]; exists {
-		result, err := replayOrder(existing, order)
-		if err == nil {
-			timing.Outcome = TimingReplayed
-		}
-		return result, err
-	}
-	if _, reserved := s.pendingOrderIDs[order.ID()]; reserved {
-		return SubmitOrderResult{}, ErrDuplicateOrder
-	}
-
-	sequence := s.engine.TradeSequence()
-	if uint64(len(provisional)) > ^uint64(0)-sequence {
-		return SubmitOrderResult{}, fmt.Errorf("trade sequence exhausted")
-	}
-
-	trades := make([]*orders.Trade, 0, len(provisional))
-	for _, tentative := range provisional {
-		sequence++
-		confirmed, err := orders.NewTrade(
-			fmt.Sprintf("trade-%06d", sequence),
-			tentative.Symbol(),
-			tentative.BuyOrderID(),
-			tentative.SellOrderID(),
-			tentative.Price(),
-			tentative.Quantity(),
-			tentative.ExecutedAt(),
-		)
-		if err != nil {
-			return SubmitOrderResult{}, fmt.Errorf(
-				"finalize trade %s: %w", tentative.ID(), err,
-			)
-		}
-		trades = append(trades, confirmed)
-	}
-	confirmedEngine := orders.NewMatchingEngineWithSequence(sequence)
-
-	applyStarted := time.Time{}
-	if enabled {
-		applyStarted = time.Now()
-	}
-	applyErr := s.store.Apply(
-		ctx,
-		StateChange{
-			Orders:                  changedOrders,
-			Trades:                  trades,
-			BookSequences:           bookSequences,
-			TradeSequence:           confirmedEngine.TradeSequence(),
-			SkipTradeSequenceUpdate: restingOnly,
-		},
+	// Trade-bearing commits remain ordered by the dedicated coordinator.
+	// The registry lock is not held across durable PostgreSQL writes.
+	return s.persistMatchedOrder(
+		ctx, order, workingBook, workingOrders, changedOrders,
+		bookSequences, provisional, &timing,
 	)
-	if enabled {
-		timing.StoreApply = time.Since(applyStarted)
-	}
-	if applyErr != nil {
-		return SubmitOrderResult{}, fmt.Errorf(
-			"persist order submission: %w",
-			applyErr,
-		)
-	}
-
-	publishStarted := time.Time{}
-	if enabled {
-		publishStarted = time.Now()
-	}
-	// Publish only after durable success. Cloned orders that were filled
-	// and removed from the book are still updated in the registry.
-	for id, updatedOrder := range workingOrders {
-		s.orders[id] = updatedOrder
-	}
-	s.orders[order.ID()] = order
-	s.books[order.Symbol()] = workingBook
-	s.engine = confirmedEngine
-	if enabled {
-		timing.Publication = time.Since(publishStarted)
-	}
-	timing.Outcome = TimingCommitted
-
-	return SubmitOrderResult{
-		Order:  snapshotOrder(order),
-		Trades: trades,
-	}, nil
 }
 
 // GetOrder returns a snapshot of the current state of an order.
