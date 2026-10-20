@@ -66,7 +66,7 @@ func TestPostgresCancellationAndIndependentMatchPreserveRecovery(t *testing.T) {
 	}()
 	select {
 	case <-store.entered:
-	case <-time.After(5*time.Second):
+	case <-time.After(5 * time.Second):
 		t.Fatal("cancellation did not commit to PostgreSQL")
 	}
 
@@ -100,7 +100,7 @@ func TestPostgresCancellationAndIndependentMatchPreserveRecovery(t *testing.T) {
 		if err != nil {
 			t.Fatalf("ETH match did not commit independently: %v", err)
 		}
-	case <-time.After(5*time.Second):
+	case <-time.After(5 * time.Second):
 		t.Fatal("ETH matching blocked behind committed cancellation")
 	}
 

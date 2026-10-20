@@ -178,7 +178,7 @@ func TestCancellationPersistenceFailureLeavesBookAndSequenceUntouched(t *testing
 	store := &blockedCancellationStore{
 		entered: make(chan struct{}),
 		release: make(chan struct{}),
-		fail: errors.New("storage unavailable"),
+		fail:    errors.New("storage unavailable"),
 	}
 	service := NewServiceWithStore(store)
 	var once sync.Once
