@@ -310,8 +310,8 @@ concurrent trade commits and recovery across delayed resting publications.
 - A running non-crossing commit can overlap a trade commit for a different
   symbol; the trade sequence remains durable and monotonic.
 - At the time of this resting-write optimization, cancellation and matching
-  retained their global commit lock. Cancellation is optimized separately below;
-  matching with trades still holds the global commit lock.
+  retained their global commit lock. Cancellation was optimized separately below;
+  trade-producing commits subsequently moved to a dedicated coordinator.
 
 ## Concurrent PostgreSQL cancellation commits (October 2026)
 
@@ -355,12 +355,12 @@ same-runner check. Depth grows with operation count and the database is local.
 **Destructive:** this benchmark truncates orders/trades and resets trade
 sequence. Only use disposable PostgreSQL databases.
 
-### Remaining work
+### Earlier limitation (before the trade coordinator)
 
-Trade-producing matching still holds the global mutex across PostgreSQL
-writes to preserve monotonic globally unique trade IDs and atomic
-durability-before-publication. Any attempt to parallelize those commits
-requires a dedicated commit coordinator or equivalent sequencing protocol.
+Trade-producing matching previously held the registry's global mutex across
+PostgreSQL writes to preserve trade-ID ordering. The dedicated coordinator
+described below removes that registry bottleneck while preserving ordered
+trade commits; simultaneous trade-bearing writes remain future work.
 
 ## Dedicated trade-commit coordinator (October 2026)
 
