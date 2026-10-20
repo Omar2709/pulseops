@@ -90,6 +90,16 @@ jobs:
       - name: Measure PostgreSQL cancellation throughput (3 samples)
         run: go test -run '^$' -bench '^BenchmarkTradingServicePostgresCancel$' -benchtime=100ms -count=3 -benchmem ./internal/postgres
 
+      - name: Compare cancellation performance on the same runner (temporary)
+        run: |
+          git fetch --depth=1 origin 18561a289f050201a302d18aa54ff13783351870
+          git worktree add --detach "$RUNNER_TEMP/pulseops-cancellation-baseline" FETCH_HEAD
+          cp internal/postgres/service_bench_test.go "$RUNNER_TEMP/pulseops-cancellation-baseline/internal/postgres/service_bench_test.go"
+          echo '=== BASELINE (original cancellation path) ==='
+          (cd "$RUNNER_TEMP/pulseops-cancellation-baseline" && go test -run '^$' -bench '^BenchmarkTradingServicePostgresCancel$' -benchtime=150ms -count=3 -benchmem ./internal/postgres)
+          echo '=== OPTIMIZED (parallel cancellation commits) ==='
+          go test -run '^$' -bench '^BenchmarkTradingServicePostgresCancel$' -benchtime=150ms -count=3 -benchmem ./internal/postgres
+
   race:
     name: Race Detector
     runs-on: ubuntu-latest
