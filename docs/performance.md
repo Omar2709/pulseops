@@ -310,8 +310,8 @@ concurrent trade commits and recovery across delayed resting publications.
 - A running non-crossing commit can overlap a trade commit for a different
   symbol; the trade sequence remains durable and monotonic.
 - At the time of this resting-write optimization, cancellation and matching
-  retained their global commit lock. Cancellation is optimized separately below;
-  matching with trades still holds the global commit lock.
+  retained their global commit lock. Cancellation was optimized separately below;
+  trade-producing commits subsequently moved to a dedicated coordinator.
 
 ## Concurrent PostgreSQL cancellation commits (October 2026)
 
@@ -355,9 +355,49 @@ same-runner check. Depth grows with operation count and the database is local.
 **Destructive:** this benchmark truncates orders/trades and resets trade
 sequence. Only use disposable PostgreSQL databases.
 
-### Remaining work
+### Earlier limitation (before the trade coordinator)
 
-Trade-producing matching still holds the global mutex across PostgreSQL
-writes to preserve monotonic globally unique trade IDs and atomic
-durability-before-publication. Any attempt to parallelize those commits
-requires a dedicated commit coordinator or equivalent sequencing protocol.
+Trade-producing matching previously held the registry's global mutex across
+PostgreSQL writes to preserve trade-ID ordering. The dedicated coordinator
+described below removes that registry bottleneck while preserving ordered
+trade commits; simultaneous trade-bearing writes remain future work.
+
+## Dedicated trade-commit coordinator (October 2026)
+
+Matching that generates trades now uses a dedicated in-process `tradeCommitMu`
+to serialize trade ID allocation and durable transaction order. The global
+registry mutex is acquired briefly to reserve the incoming order ID, read
+the last confirmed sequence, and later publish the durable result. It is **not**
+held during `StateStore.Apply` for trades. The per-symbol mutex continues
+protecting book staging and preventing same-symbol interleaving.
+
+This allows `GetOrder` and non-crossing submissions/cancellations on other
+symbols to progress while a trade transaction is blocked in PostgreSQL.
+Transactions that include trades are still committed **one at a time**.
+Therefore this is a registry-contention and responsiveness improvement,
+not parallel execution of multiple trade-bearing PostgreSQL transactions.
+
+The coordinator protects these invariants:
+
+- Every confirmed trade uses globally consecutive IDs; a failed trade
+  commit releases the reserved order ID and does not advance the sequence.
+- A trade-producing order's ID stays reserved while its write is pending,
+  rejecting a conflicting same-ID order on another symbol.
+- The book, affected order snapshots and global trade sequence are published
+  under the registry mutex only after the durable write succeeds.
+- Cancellation and resting insertion for another symbol can persist while
+  the trade write is in flight; they never overwrite the trade sequence.
+- Concurrent trade-producing submissions cannot reorder confirmations:
+  they wait on the dedicated coordinator mutex.
+
+The new unit tests use a blocking StateStore to enforce all these
+interleavings and verify rollback after failure. A PostgreSQL integration
+test delays acknowledgement after committing a trade, applies an independent
+cancellation and resting submission, and reconstructs the next consecutive
+trade ID from a consistent recovery snapshot.
+
+**Limitations:** no coordination between server processes, no guaranteed
+parallelism for trade-bearing transactions, and no reconciliation protocol
+for ambiguous commit acknowledgements after an unexpected connection loss.
+A future step could use a durable transaction sequencer with explicit
+recovery/fencing semantics before parallelizing trade commits across workers.
