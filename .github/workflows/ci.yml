@@ -87,6 +87,10 @@ jobs:
       - name: Measure resting submissions with PostgreSQL (3 samples)
         run: go test -run '^$' -bench '^BenchmarkTradingServicePostgresResting$' -benchtime=100ms -count=3 -benchmem ./internal/postgres
 
+      - name: Measure PostgreSQL cancellation throughput (3 samples)
+        run: go test -run '^$' -bench '^BenchmarkTradingServicePostgresCancel$' -benchtime=100ms -count=3 -benchmem ./internal/postgres
+
+
   race:
     name: Race Detector
     runs-on: ubuntu-latest

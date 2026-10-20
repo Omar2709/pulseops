@@ -309,5 +309,55 @@ concurrent trade commits and recovery across delayed resting publications.
 - Persistence failures release ID reservations and do not publish the order.
 - A running non-crossing commit can overlap a trade commit for a different
   symbol; the trade sequence remains durable and monotonic.
-- Cancellation and matching retain their global commit lock; this change
-  does not optimize their serial persistence path.
+- At the time of this resting-write optimization, cancellation and matching
+  retained their global commit lock. Cancellation is optimized separately below;
+  matching with trades still holds the global commit lock.
+
+## Concurrent PostgreSQL cancellation commits (October 2026)
+
+The service no longer holds its global commit mutex during PostgreSQL
+persistence for cancellations. Under the affected symbol gate, it reads
+committed state under a brief registry read lock and stages a detached
+book before calling `StateStore.Apply` outside the global lock. The
+new cancelled snapshot is published under the global mutex only after
+durability succeeds. On an error, the original order stays published.
+Other operations on the same symbol remain serialized.
+
+A PostgreSQL integration test commits a cancellation, pauses its memory
+publication, commits a matching trade on an independent symbol, then
+recovers the cancelled order and consecutive global trade IDs after restart.
+
+### Same-runner A/B benchmark
+
+`BenchmarkTradingServicePostgresCancel` measures one resting BUY submission
+and one cancellation per operation, including both actual PostgreSQL
+transactions and application locks. It verifies durable CANCELLED states
+and no trades. The benchmark reports global-lock wait and Store.Apply
+duration for the cancellation phase alone.
+
+[GitHub Actions run 39370755819](https://github.com/Omar2709/pulseops/actions/runs/39370755819)
+benchmarked the original and optimized implementations sequentially
+on the SAME runner and PostgreSQL service, with three samples each.
+
+| Scenario | Previous median | Optimized median | Ratio |
+| --- | ---: | ---: | ---: |
+| Serial | 1.291 ms/op | 1.298 ms/op | ~1.0× |
+| Parallel, one symbol | 1.346 ms/op | 1.351 ms/op | ~1.0× |
+| Parallel, eight symbols | 0.872 ms/op | 0.456 ms/op | **1.91×** |
+
+The eight-symbol throughput increased from ~1,147 to ~2,193 completed
+submit+cancel pairs/s. The median global mutex wait per cancellation
+in eight-symbol samples fell from about 116 μs to 0.8 μs. These results
+are directional, not statistical guarantees or production SLOs. Earlier
+separate-runner A/B comparisons were inconsistent, which motivated this
+same-runner check. Depth grows with operation count and the database is local.
+
+**Destructive:** this benchmark truncates orders/trades and resets trade
+sequence. Only use disposable PostgreSQL databases.
+
+### Remaining work
+
+Trade-producing matching still holds the global mutex across PostgreSQL
+writes to preserve monotonic globally unique trade IDs and atomic
+durability-before-publication. Any attempt to parallelize those commits
+requires a dedicated commit coordinator or equivalent sequencing protocol.

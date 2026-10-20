@@ -460,8 +460,8 @@ func (s *Service) CancelOrder(
 
 	id = strings.TrimSpace(id)
 
-	// Read the immutable symbol before acquiring its gate; otherwise
-	// cancellation could race with matching on a private working book.
+	// Find the immutable symbol while holding the registry read lock.
+	// The symbol gate then excludes submission and cancellation on this book.
 	s.mu.RLock()
 	order, exists := s.orders[id]
 	if !exists {
@@ -482,76 +482,73 @@ func (s *Service) CancelOrder(
 		}
 	}()
 
-	timing.GlobalLockWait = lockWithTiming(&s.mu, enabled)
-	defer s.mu.Unlock()
-
+	// Read committed state under mu, then stage a detached book without it.
+	// No other operation can modify this symbol while its gate is held.
+	timing.GlobalLockWait += lockWithTiming(s.mu.RLocker(), enabled)
 	if err := ctx.Err(); err != nil {
+		s.mu.RUnlock()
 		return OrderSnapshot{}, err
 	}
 
 	order, exists = s.orders[id]
 	if !exists {
+		s.mu.RUnlock()
 		return OrderSnapshot{}, ErrOrderNotFound
 	}
-
 	if order.Status() != orders.OrderStatusOpen &&
 		order.Status() != orders.OrderStatusPartiallyFilled {
+		s.mu.RUnlock()
 		return OrderSnapshot{}, ErrOrderNotCancellable
 	}
 
 	book, exists := s.books[order.Symbol()]
 	if !exists {
+		s.mu.RUnlock()
 		return OrderSnapshot{}, fmt.Errorf(
-			"missing order book for symbol %s",
-			order.Symbol(),
+			"missing order book for symbol %s", order.Symbol(),
 		)
 	}
+	sequence := s.engine.TradeSequence()
+	s.mu.RUnlock()
 
 	workingBook, workingOrders := book.Clone()
-
 	workingOrder, exists := workingOrders[order.ID()]
 	if !exists {
 		return OrderSnapshot{}, fmt.Errorf(
-			"missing cloned order %s",
-			order.ID(),
+			"missing cloned order %s", order.ID(),
 		)
 	}
-
-	if err := workingBook.Cancel(
-		workingOrder.ID(),
-		s.now(),
-	); err != nil {
+	if err := workingBook.Cancel(workingOrder.ID(), s.now()); err != nil {
 		return OrderSnapshot{}, fmt.Errorf(
-			"cancel order %s: %w",
-			workingOrder.ID(),
-			err,
+			"cancel order %s: %w", workingOrder.ID(), err,
 		)
 	}
-
 	cancelled := snapshotOrder(workingOrder)
 
+	// Cancellation does not advance the global trade sequence. Persisting
+	// outside the global mutex allows unrelated symbols to commit concurrently.
 	applyStarted := time.Time{}
 	if enabled {
 		applyStarted = time.Now()
 	}
-	applyErr := s.store.Apply(
-		ctx,
-		StateChange{
-			Orders:                  []OrderSnapshot{cancelled},
-			TradeSequence:           s.engine.TradeSequence(),
-			SkipTradeSequenceUpdate: true,
-		},
-	)
+	applyErr := s.store.Apply(ctx, StateChange{
+		Orders:                  []OrderSnapshot{cancelled},
+		TradeSequence:           sequence,
+		SkipTradeSequenceUpdate: true,
+	})
 	if enabled {
 		timing.StoreApply = time.Since(applyStarted)
 	}
 	if applyErr != nil {
 		return OrderSnapshot{}, fmt.Errorf(
-			"persist order cancellation: %w",
-			applyErr,
+			"persist order cancellation: %w", applyErr,
 		)
 	}
 
+	// No operation can change this book until the per-symbol gate releases.
+	// Publish only the durable result and never replace s.engine: other
+	// symbols may have committed trades during the cancellation transaction.
+	timing.GlobalLockWait += lockWithTiming(&s.mu, enabled)
 	publishStarted := time.Time{}
 	if enabled {
 		publishStarted = time.Now()
@@ -561,7 +558,7 @@ func (s *Service) CancelOrder(
 	if enabled {
 		timing.Publication = time.Since(publishStarted)
 	}
+	s.mu.Unlock()
 	timing.Outcome = TimingCommitted
-
 	return cancelled, nil
 }
