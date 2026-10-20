@@ -28,6 +28,8 @@ const (
 // Other work (validation, staging, matching, trade-ID assignment) is not
 // included in these measurements. Durations are zero for phases not reached.
 // Time within StoreApply includes the underlying database transaction.
+// GlobalLockWait includes trade coordinator wait for trade-producing submissions
+// plus waits to acquire the registry lock for reservation and publication.
 type OperationTiming struct {
 	Operation      TimingOperation
 	Outcome        TimingOutcome

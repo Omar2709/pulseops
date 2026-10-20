@@ -60,7 +60,8 @@ type SubmitOrderResult struct {
 }
 
 type Service struct {
-	// mu protects the registry, books, global trade sequence, and commits.
+	// mu protects the registry, books, confirmed trade sequence and publication.
+	// Trade writes are sequenced separately by tradeCommitMu.
 	mu     sync.RWMutex
 	books  map[string]*orders.OrderBook
 	orders map[string]*orders.Order
