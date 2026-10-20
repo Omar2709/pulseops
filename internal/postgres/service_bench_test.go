@@ -253,7 +253,6 @@ func BenchmarkTradingServicePostgresResting(b *testing.B) {
 	}
 }
 
-
 // BenchmarkTradingServicePostgresCancel measures submit+cancel pairs on a
 // real PostgreSQL store. Matching is excluded; every order remains resting
 // until cancellation. The benchmark checks all rows were durably cancelled.
