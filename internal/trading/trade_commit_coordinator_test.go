@@ -12,9 +12,9 @@ import (
 )
 
 type blockingTradeCommitStore struct {
-	entered chan struct{}
-	release chan struct{}
-	active atomic.Int32
+	entered   chan struct{}
+	release   chan struct{}
+	active    atomic.Int32
 	maxActive atomic.Int32
 }
 
